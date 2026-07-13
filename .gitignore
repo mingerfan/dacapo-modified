@@ -31,3 +31,7 @@ Session.vim
 .venv
 result
 .nix-dev-shell
+/compile_commands.json
+/command.json
+/compile_flags.txt
+/.clangd

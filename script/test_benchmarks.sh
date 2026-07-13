@@ -8,20 +8,11 @@ management=eva
 waterline=35
 
 list_for_basic="
-HarrisCornerDetection
-SobelFilter
 MLP
-LinearRegression
-PolynomialRegression
-Multivariate
 "
 
 list_for_deep="
 ResNet
-AlexNet
-SqueezeNet
-MobileNet
-VGG16
 "
 
 cd ${scriptPATH}
@@ -132,4 +123,3 @@ do
 done
 echo -e "\033[1;32m======   Run benchmarks for HEaaN - GPU : Done ======\033[0m"
 ########################
-
