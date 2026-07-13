@@ -1,3 +1,5 @@
 add_subdirectory(Conversion)
 add_subdirectory(Dialect)
-add_subdirectory(Runtime)
+if (HECATE_ENABLE_SEAL_RUNTIME OR HECATE_ENABLE_HEAAN_RUNTIME)
+  add_subdirectory(Runtime)
+endif()

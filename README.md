@@ -22,7 +22,7 @@ We aim to support privacy-preserving machine learning and deep learning applicat
 
 ## Installation 
 
-### Requirements 
+### Requirements
 ```
 Ninja   
 git  
@@ -30,6 +30,25 @@ cmake >= 3.22.1
 python >= 3.10  
 clang,clang++ >= 14.0.0  
 ```
+
+### Nix development environment
+
+The default Nix environment pins LLVM, MLIR, and Clang 18.1.8 together with
+CMake, Ninja, Git, Python, clangd, and the LLVM/MLIR TableGen tools. It builds
+the compiler and command-line tools without an HE runtime:
+
+```bash
+nix develop
+cmake --preset nix
+cmake --build --preset nix
+```
+
+The same compiler-only build can be produced directly with `nix build`.
+`SEAL_HEVM` and `HEAAN_HEVM` are optional runtime adapters. Enable them with
+`-DHECATE_ENABLE_SEAL_RUNTIME=ON` or
+`-DHECATE_ENABLE_HEAAN_RUNTIME=ON` and provide SEAL 4.0 or the proprietary
+HEaaN SDK respectively. Python tracing and benchmark dependencies remain in
+`requirements.txt`; they are separate from the C++ compiler toolchain.
 
 ### Install MLIR 
 ```bash
@@ -247,4 +266,3 @@ Yongwoo Lee, Seonyeong Heo, Seonyoung Cheon, Shinnung Jeong, Changsu Kim, Eunkyu
   year={2024}
 }
 ```
-

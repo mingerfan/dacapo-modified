@@ -29,3 +29,5 @@ examples/optimized
 examples/traced
 Session.vim
 .venv
+result
+.nix-dev-shell

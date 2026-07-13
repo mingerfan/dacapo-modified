@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.22)
 
 
 # VERSION SETTING
@@ -56,11 +56,42 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # set(CMAKE_BUILD_TYPE Debug)
 
 # PACKAGE SETTING
+
+option(HECATE_ENABLE_SEAL_RUNTIME "Build the SEAL HEVM runtime" OFF)
+option(HECATE_ENABLE_HEAAN_RUNTIME "Build the HEaaN HEVM runtime" OFF)
+
 find_package(MLIR REQUIRED CONFIG)
-find_package(SEAL 4.0 REQUIRED CONFIG)
-# find_package(HEaaN REQUIRED CONFIG)
-find_package(HEaaN)
+if (HECATE_ENABLE_SEAL_RUNTIME)
+  find_package(SEAL 4.0 REQUIRED CONFIG)
+endif()
+if (HECATE_ENABLE_HEAAN_RUNTIME)
+  find_package(HEaaN REQUIRED CONFIG)
+endif()
 find_package(OpenMP)
+
+# Packaged MLIR installations may expose the TableGen tools by name instead of
+# by absolute path. Resolve them here so Ninja does not mistake the executable
+# name for a build target.
+if (NOT IS_ABSOLUTE "${MLIR_TABLEGEN_EXE}")
+  find_program(HECATE_MLIR_TABLEGEN
+    NAMES ${MLIR_TABLEGEN_EXE} mlir-tblgen
+    HINTS "${MLIR_INSTALL_PREFIX}/bin" "${LLVM_TOOLS_BINARY_DIR}"
+          "${LLVM_INSTALL_PREFIX}/bin")
+  if (HECATE_MLIR_TABLEGEN)
+    set(MLIR_TABLEGEN_EXE "${HECATE_MLIR_TABLEGEN}")
+    set(MLIR_TABLEGEN_TARGET "${HECATE_MLIR_TABLEGEN}")
+  endif()
+endif()
+
+if (NOT IS_ABSOLUTE "${LLVM_TABLEGEN_EXE}")
+  find_program(HECATE_LLVM_TABLEGEN
+    NAMES ${LLVM_TABLEGEN_EXE} llvm-tblgen
+    HINTS "${LLVM_TOOLS_BINARY_DIR}" "${LLVM_INSTALL_PREFIX}/bin")
+  if (HECATE_LLVM_TABLEGEN)
+    set(LLVM_TABLEGEN_EXE "${HECATE_LLVM_TABLEGEN}")
+    set(LLVM_TABLEGEN_TARGET "${HECATE_LLVM_TABLEGEN}")
+  endif()
+endif()
 
 # MLIR SETTING
 
@@ -99,4 +130,3 @@ add_subdirectory (lib)
 add_subdirectory (tools)
 
 # get_target_property(HEAAN_INCLUDE_DIR HEaaN::HEaaN INTERFACE_INCLUDE_DIRECTORIES)
-
