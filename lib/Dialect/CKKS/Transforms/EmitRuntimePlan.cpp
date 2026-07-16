@@ -4,15 +4,19 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "nlohmann/json.hpp"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/SHA256.h"
 
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <string>
 
 namespace hecate {
@@ -50,13 +54,122 @@ bool isSha256(llvm::StringRef value) {
 
 Json hostPlace() { return {{"kind", "host"}, {"rank", 0}}; }
 
-FailureOr<Json> encodePayload(Attribute payload, Operation *op) {
+std::string sha256(llvm::StringRef bytes) {
+  llvm::SHA256 hasher;
+  hasher.update(bytes);
+  const auto digest = hasher.final();
+  return "sha256:" + llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true);
+}
+
+LogicalResult writeFile(const std::filesystem::path &path,
+                        llvm::StringRef bytes, Operation *op) {
+  std::ofstream output(path, std::ios::binary);
+  if (!output)
+    return op->emitError("cannot open output file: ") << path.string();
+  output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  if (!output)
+    return op->emitError("failed to write output file: ") << path.string();
+  return success();
+}
+
+class PlaintextBundleWriter {
+public:
+  PlaintextBundleWriter(std::filesystem::path directory, std::string id)
+      : directory(std::move(directory)), id(std::move(id)) {}
+
+  bool used() const { return !blobs.empty(); }
+
+  FailureOr<Json> externalize(DenseElementsAttr dense, Operation *op) {
+    if (!dense.getElementType().isa<FloatType>()) {
+      op->emitError(
+          "RuntimePlan bundle externalization requires a float payload");
+      return failure();
+    }
+
+    std::string bytes;
+    const int64_t elements = dense.getNumElements();
+    constexpr uint64_t maxBundleBytes = (1ULL << 53) - 1;
+    if (elements <= 0 || static_cast<uint64_t>(elements) > maxBundleBytes / 8) {
+      op->emitError("RuntimePlan bundle payload byte length is out of range");
+      return failure();
+    }
+    bytes.reserve(static_cast<size_t>(elements) * 8);
+    for (const APFloat &value : dense.getValues<APFloat>()) {
+      const double converted = value.convertToDouble();
+      if (!std::isfinite(converted)) {
+        op->emitError("RuntimePlan Encode payload must contain finite values");
+        return failure();
+      }
+      uint64_t bits = 0;
+      static_assert(sizeof(bits) == sizeof(converted), "float64 is required");
+      std::memcpy(&bits, &converted, sizeof(bits));
+      for (int byte = 0; byte < 8; ++byte)
+        bytes.push_back(static_cast<char>((bits >> (byte * 8)) & 0xff));
+    }
+
+    const std::string content = sha256(bytes);
+    const auto [it, inserted] = blobs.emplace(content, bytes.size());
+    if (inserted) {
+      std::error_code error;
+      std::filesystem::create_directories(directory / "data", error);
+      if (error) {
+        op->emitError("cannot create RuntimePlan bundle directory: ")
+            << directory.string() << ": " << error.message();
+        return failure();
+      }
+      const std::filesystem::path blobPath =
+          directory / "data" / (content.substr(7) + ".bin");
+      if (failed(writeFile(blobPath, bytes, op)))
+        return failure();
+    } else if (it->second != bytes.size()) {
+      op->emitError("RuntimePlan bundle SHA-256 collision");
+      return failure();
+    }
+    return Json{{"kind", "bundle"}, {"content", content}};
+  }
+
+  FailureOr<Json> writeManifest(Operation *op) const {
+    Json entries = Json::array();
+    for (const auto &[content, byteLength] : blobs)
+      entries.push_back(
+          {{"content", content}, {"byte_length", byteLength}});
+    const Json manifest = {{"bundle_format_version", 1},
+                           {"bundle_id", id},
+                           {"version", 1},
+                           {"blobs", std::move(entries)}};
+    const std::string manifestBytes = manifest.dump(2) + '\n';
+    if (failed(writeFile(directory / "manifest.json", manifestBytes, op)))
+      return failure();
+    return Json{{"id", id},
+                {"version", 1},
+                {"manifest_sha256", sha256(manifestBytes)}};
+  }
+
+private:
+  std::filesystem::path directory;
+  std::string id;
+  std::map<std::string, uint64_t> blobs;
+};
+
+FailureOr<Json> encodePayload(Attribute payload, Operation *op,
+                              PlaintextBundleWriter &bundle,
+                              uint64_t inlinePayloadMaxBytes) {
   auto dense = payload.dyn_cast<DenseElementsAttr>();
   if (!dense) {
-    op->emitError("RuntimePlan Encode requires an inline DenseElementsAttr; "
+    op->emitError("RuntimePlan Encode requires a DenseElementsAttr; "
                   "legacy .cst indices are not supported");
     return failure();
   }
+
+  const int64_t elements = dense.getNumElements();
+  if (elements <= 0 ||
+      static_cast<uint64_t>(elements) >
+          std::numeric_limits<uint64_t>::max() / 8) {
+    op->emitError("RuntimePlan Encode payload size is out of range");
+    return failure();
+  }
+  if (static_cast<uint64_t>(elements) * 8 > inlinePayloadMaxBytes)
+    return bundle.externalize(dense, op);
 
   Json values = Json::array();
   auto elementType = dense.getElementType();
@@ -92,9 +205,12 @@ FailureOr<Json> encodePayload(Attribute payload, Operation *op) {
 struct RuntimePlanBuilder {
   RuntimePlanBuilder(func::FuncOp func, llvm::StringRef contextId, bool ntt,
                      llvm::StringRef bootProfile,
-                     llvm::StringRef bootImplementation)
+                     llvm::StringRef bootImplementation,
+                     PlaintextBundleWriter &bundle,
+                     uint64_t inlinePayloadMaxBytes)
       : func(func), contextId(contextId), ntt(ntt), bootProfile(bootProfile),
-        bootImplementation(bootImplementation) {}
+        bootImplementation(bootImplementation), bundle(bundle),
+        inlinePayloadMaxBytes(inlinePayloadMaxBytes) {}
 
   LogicalResult build(Json &values, Json &externalInputs, Json &initialization,
                       Json &execution, Json &finalOutputs) {
@@ -124,7 +240,8 @@ struct RuntimePlanBuilder {
         return failure();
 
       if (auto encode = dyn_cast<ckks::EncodeOp>(op)) {
-        FailureOr<Json> payload = encodePayload(encode.getPayload(), &op);
+        FailureOr<Json> payload = encodePayload(
+            encode.getPayload(), &op, bundle, inlinePayloadMaxBytes);
         if (failed(payload))
           return failure();
         initialization.push_back({{"kind", "encode"},
@@ -294,6 +411,8 @@ private:
   bool ntt;
   std::string bootProfile;
   std::string bootImplementation;
+  PlaintextBundleWriter &bundle;
+  uint64_t inlinePayloadMaxBytes;
   llvm::DenseMap<Value, uint64_t> ids;
   uint64_t nextValueId = 0;
 };
@@ -326,9 +445,12 @@ struct EmitRuntimePlanPass
         capabilityVersion > std::numeric_limits<int32_t>::max() ||
         operatorSpecVersion < 1 ||
         operatorSpecVersion > std::numeric_limits<int32_t>::max() ||
-        deviceCount < 0 || deviceCount > std::numeric_limits<int32_t>::max()) {
+        deviceCount < 0 || deviceCount > std::numeric_limits<int32_t>::max() ||
+        inlinePayloadMaxBytes < 0 ||
+        inlinePayloadMaxBytes > static_cast<int64_t>((1ULL << 53) - 1)) {
       func.emitError("RuntimePlan versions and device-count must fit the V1 "
-                     "nonnegative int32 range; versions cannot be zero");
+                     "ranges; versions cannot be zero and the inline payload "
+                     "limit must be a nonnegative safe JSON integer");
       signalPassFailure();
       return;
     }
@@ -344,9 +466,17 @@ struct EmitRuntimePlanPass
     Json initialization = Json::array();
     Json execution = Json::array();
     Json finalOutputs = Json::array();
+    const std::string artifactStem =
+        prefix.getValue() + "." + func.getName().str();
+    PlaintextBundleWriter bundle(
+        artifactStem + ".bundle",
+        "runtime-plan-" + planId.getValue() + "-" + func.getName().str() +
+            "-plaintexts");
     RuntimePlanBuilder builder(func, contextId.getValue(), ntt.getValue(),
                                bootProfile.getValue(),
-                               bootImplementation.getValue());
+                               bootImplementation.getValue(), bundle,
+                               static_cast<uint64_t>(
+                                   inlinePayloadMaxBytes.getValue()));
     if (failed(builder.build(values, externalInputs, initialization, execution,
                              finalOutputs))) {
       signalPassFailure();
@@ -371,21 +501,21 @@ struct EmitRuntimePlanPass
                  {"finalization", Json::array()},
                  {"final_outputs", std::move(finalOutputs)}};
 
-    std::filesystem::path outputPath(prefix.getValue());
-    outputPath =
-        outputPath.string() + "." + func.getName().str() + ".runtime-plan.json";
-    std::ofstream output(outputPath);
-    if (!output) {
-      func.emitError("cannot open RuntimePlan output file: ")
-          << outputPath.string();
+    if (bundle.used()) {
+      FailureOr<Json> reference = bundle.writeManifest(func);
+      if (failed(reference)) {
+        signalPassFailure();
+        return;
+      }
+      plan["plaintext_bundle"] = std::move(*reference);
+    }
+
+    const std::filesystem::path outputPath =
+        artifactStem + ".runtime-plan.json";
+    const std::string planBytes = plan.dump(2) + '\n';
+    if (failed(writeFile(outputPath, planBytes, func))) {
       signalPassFailure();
       return;
-    }
-    output << plan.dump(2) << '\n';
-    if (!output) {
-      func.emitError("failed to write RuntimePlan output file: ")
-          << outputPath.string();
-      signalPassFailure();
     }
   }
 };

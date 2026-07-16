@@ -265,6 +265,10 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       "runtime-plan-boot-implementation",
       cl::desc("Boot implementation: native or decrypt_reencrypt"),
       cl::init("native")};
+  static cl::opt<int64_t> runtime_plan_inline_payload_max_bytes{
+      "runtime-plan-inline-payload-max-bytes",
+      cl::desc("Largest RuntimePlan Encode payload kept inline"),
+      cl::init(4096)};
 
   auto addRuntimePlanExport = [&](OpPassManager &pm,
                                   const std::string &artifactPrefix) {
@@ -281,6 +285,7 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
     options.ntt = runtime_plan_ntt;
     options.bootProfile = runtime_plan_boot_profile;
     options.bootImplementation = runtime_plan_boot_implementation;
+    options.inlinePayloadMaxBytes = runtime_plan_inline_payload_max_bytes;
     pm.addNestedPass<func::FuncOp>(
         hecate::ckks::createEmitRuntimePlan(options));
   };

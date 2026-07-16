@@ -59,7 +59,10 @@ def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
            /*default=*/[{""}], "OperatorSpec boot profile id">,
     Option<"bootImplementation", "boot-implementation", "std::string",
            /*default=*/[{"native"}],
-           "Boot implementation: native or decrypt_reencrypt">
+           "Boot implementation: native or decrypt_reencrypt">,
+    Option<"inlinePayloadMaxBytes", "inline-payload-max-bytes", "int64_t",
+           /*default=*/[{4096}],
+           "Largest Encode payload kept inline; larger float64 payloads use a bundle">
   ];
 }
 

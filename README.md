@@ -57,9 +57,11 @@ HEaaN SDK respectively. Python tracing and benchmark dependencies remain in
 This fork carries CKKS `components`, `scale_log2`, and `level` in
 `!ckks.poly` types. Ciphertext multiplication lowers to separate
 `ckks.mulcc` and `ckks.relinearize` operations. The `emit-runtime-plan` pass
-serializes linear single-Host CKKS functions to RuntimePlan V1 JSON; the old
-HEVM emitter is retired and reports an error when invoked. Run `ctest` after
-the Nix build to exercise the RuntimePlan lowering fixtures.
+serializes linear single-Host CKKS functions to RuntimePlan V1 JSON. Encode
+payloads larger than 4096 bytes are written to a content-addressed plaintext
+bundle, while smaller payloads remain inline. The old HEVM emitter is retired
+and reports an error when invoked. Run `ctest` after the Nix build to exercise
+the RuntimePlan lowering fixtures.
 
 ### Install MLIR 
 ```bash
