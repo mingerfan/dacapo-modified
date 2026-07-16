@@ -233,9 +233,61 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
   static cl::opt<int64_t> gamma_elasm{"gamma-elasm", cl::desc("Gamma of ELASM"),
                                       cl::init(50)};
 
+  static cl::opt<std::string> runtime_plan_id{
+      "runtime-plan-id", cl::desc("RuntimePlan decimal plan id"),
+      cl::init("0")};
+  static cl::opt<std::string> runtime_plan_target_id{
+      "runtime-plan-target-id", cl::desc("RuntimePlan target id"),
+      cl::init("")};
+  static cl::opt<int64_t> runtime_plan_capability_version{
+      "runtime-plan-capability-version",
+      cl::desc("RuntimePlan target capability version"), cl::init(1)};
+  static cl::opt<std::string> runtime_plan_operator_spec_id{
+      "runtime-plan-operator-spec-id", cl::desc("OperatorSpec id"),
+      cl::init("")};
+  static cl::opt<int64_t> runtime_plan_operator_spec_version{
+      "runtime-plan-operator-spec-version", cl::desc("OperatorSpec version"),
+      cl::init(1)};
+  static cl::opt<std::string> runtime_plan_operator_spec_sha256{
+      "runtime-plan-operator-spec-sha256",
+      cl::desc("SHA-256 of the exact OperatorSpec bytes"), cl::init("")};
+  static cl::opt<std::string> runtime_plan_context_id{
+      "runtime-plan-context-id", cl::desc("CKKS context id"), cl::init("")};
+  static cl::opt<int64_t> runtime_plan_device_count{
+      "runtime-plan-device-count",
+      cl::desc("Device count for the single RuntimePlan rank"), cl::init(0)};
+  static cl::opt<bool> runtime_plan_ntt{
+      "runtime-plan-ntt", cl::desc("ValueDesc NTT state"), cl::init(true)};
+  static cl::opt<std::string> runtime_plan_boot_profile{
+      "runtime-plan-boot-profile", cl::desc("OperatorSpec boot profile id"),
+      cl::init("")};
+  static cl::opt<std::string> runtime_plan_boot_implementation{
+      "runtime-plan-boot-implementation",
+      cl::desc("Boot implementation: native or decrypt_reencrypt"),
+      cl::init("native")};
+
+  auto addRuntimePlanExport = [&](OpPassManager &pm,
+                                  const std::string &artifactPrefix) {
+    hecate::ckks::EmitRuntimePlanOptions options;
+    options.prefix = artifactPrefix;
+    options.planId = runtime_plan_id;
+    options.targetId = runtime_plan_target_id;
+    options.capabilityVersion = runtime_plan_capability_version;
+    options.operatorSpecId = runtime_plan_operator_spec_id;
+    options.operatorSpecVersion = runtime_plan_operator_spec_version;
+    options.operatorSpecSha256 = runtime_plan_operator_spec_sha256;
+    options.contextId = runtime_plan_context_id;
+    options.deviceCount = runtime_plan_device_count;
+    options.ntt = runtime_plan_ntt;
+    options.bootProfile = runtime_plan_boot_profile;
+    options.bootImplementation = runtime_plan_boot_implementation;
+    pm.addNestedPass<func::FuncOp>(
+        hecate::ckks::createEmitRuntimePlan(options));
+  };
+
   PassPipelineRegistration<>(
       "eva", "Perform waterline rescaling and early modswitch",
-      [&](OpPassManager &pm) {
+      [&, addRuntimePlanExport](OpPassManager &pm) {
         std::string dir;
         std::string stem;
         if (outputFilename != "-") {
@@ -271,16 +323,13 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
           pm.addPass(createLocationSnapshotPass(
               OpPrintingFlags().enableDebugInfo(false, false),
               dir + "/" + stem + ".ckks.mlir", "ckks"));
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createRemoveLevel());
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createReuseBuffer());
         pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-        pm.addNestedPass<func::FuncOp>(
-            hecate::ckks::createEmitHEVM({dir + "/" + stem}));
+        addRuntimePlanExport(pm, (std::filesystem::path(dir) / stem).string());
       });
 
   PassPipelineRegistration<>(
       "snr", "Perform SNR rescaling and early modswitch",
-      [&](OpPassManager &pm) {
+      [&, addRuntimePlanExport](OpPassManager &pm) {
         std::string dir;
         std::string stem;
         if (outputFilename != "-") {
@@ -317,15 +366,13 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
           pm.addPass(createLocationSnapshotPass(
               OpPrintingFlags().enableDebugInfo(false, false),
               dir + "/" + stem + ".ckks.mlir", "ckks"));
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createRemoveLevel());
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createReuseBuffer());
         pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-        pm.addNestedPass<func::FuncOp>(
-            hecate::ckks::createEmitHEVM({dir + "/" + stem}));
+        addRuntimePlanExport(pm, (std::filesystem::path(dir) / stem).string());
       });
 
   PassPipelineRegistration<>(
-      "elasm", "Perform ELLASM exploration ", [&](OpPassManager &pm) {
+      "elasm", "Perform ELLASM exploration ",
+      [&, addRuntimePlanExport](OpPassManager &pm) {
         std::string dir;
         std::string stem;
         if (outputFilename != "-") {
@@ -370,16 +417,13 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
         pm.addNestedPass<func::FuncOp>(
             hecate::ckks::createUpscaleToMulcpConversionPass());
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createRemoveLevel());
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createReuseBuffer());
         pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-        pm.addNestedPass<func::FuncOp>(
-            hecate::ckks::createEmitHEVM({dir + "/" + stem}));
+        addRuntimePlanExport(pm, (std::filesystem::path(dir) / stem).string());
       });
 
   PassPipelineRegistration<>(
       "dacapo", "Perform automatic bootstrapping placement",
-      [&](OpPassManager &pm) {
+      [&, addRuntimePlanExport](OpPassManager &pm) {
         std::string dir;
         std::string stem;
         if (outputFilename != "-") {
@@ -428,15 +472,12 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
           pm.addPass(createLocationSnapshotPass(
               OpPrintingFlags().enableDebugInfo(false, false),
               dir + "/" + stem + ".ckks.mlir", "ckks"));
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createRemoveLevel());
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createReuseBuffer());
         pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-        pm.addNestedPass<func::FuncOp>(
-            hecate::ckks::createEmitHEVM({dir + "/" + stem}));
+        addRuntimePlanExport(pm, (std::filesystem::path(dir) / stem).string());
       });
   PassPipelineRegistration<>(
       "pars", "Perform Scale Management on bootstrapped models",
-      [&](OpPassManager &pm) {
+      [&, addRuntimePlanExport](OpPassManager &pm) {
         std::string dir;
         std::string stem;
         if (outputFilename != "-") {
@@ -472,10 +513,7 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
           pm.addPass(createLocationSnapshotPass(
               OpPrintingFlags().enableDebugInfo(false, false),
               dir + "/" + stem + ".ckks.mlir", "ckks"));
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createRemoveLevel());
-        pm.addNestedPass<func::FuncOp>(hecate::ckks::createReuseBuffer());
         pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-        pm.addNestedPass<func::FuncOp>(
-            hecate::ckks::createEmitHEVM({dir + "/" + stem}));
+        addRuntimePlanExport(pm, (std::filesystem::path(dir) / stem).string());
       });
 }

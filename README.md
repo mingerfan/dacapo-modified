@@ -44,11 +44,18 @@ cmake --build --preset nix
 ```
 
 The same compiler-only build can be produced directly with `nix build`.
-`SEAL_HEVM` and `HEAAN_HEVM` are optional runtime adapters. Enable them with
+`SEAL_HEVM` and `HEAAN_HEVM` are legacy optional runtime adapters. Enable them with
 `-DHECATE_ENABLE_SEAL_RUNTIME=ON` or
 `-DHECATE_ENABLE_HEAAN_RUNTIME=ON` and provide SEAL 4.0 or the proprietary
 HEaaN SDK respectively. Python tracing and benchmark dependencies remain in
 `requirements.txt`; they are separate from the C++ compiler toolchain.
+
+This fork carries CKKS `components`, `scale_log2`, and `level` in
+`!ckks.poly` types. Ciphertext multiplication lowers to separate
+`ckks.mulcc` and `ckks.relinearize` operations. The `emit-runtime-plan` pass
+serializes linear single-Host CKKS functions to RuntimePlan V1 JSON; the old
+HEVM emitter is retired and reports an error when invoked. Run `ctest` after
+the Nix build to exercise the RuntimePlan lowering fixtures.
 
 ### Install MLIR 
 ```bash

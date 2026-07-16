@@ -33,7 +33,7 @@ struct ReuseBufferPass
       for (int i = 0; i < op.getNumDpsInputs(); i++) {
         auto v = op.getDpsInputOperand(i);
         if (auto tt = hecate::ckks::getPolyType(v->get())) {
-          if (tt.getNumPoly() == 1)
+          if (tt.getComponents() == 1)
             continue;
           if (l.isDeadAfter(v->get(), op) &&
               (garbage.empty() || v->get() != garbage.back())) {
@@ -44,7 +44,7 @@ struct ReuseBufferPass
       for (int i = 0; i < op.getNumDpsInits(); i++) {
         auto v = op.getDpsInitOperand(i);
         if (auto tt = hecate::ckks::getPolyType(v->get())) {
-          if (tt.getNumPoly() == 1)
+          if (tt.getComponents() == 1)
             continue;
           if (!garbage.empty()) {
             op.getDpsInitOperand(i)->set(garbage.pop_back_val());

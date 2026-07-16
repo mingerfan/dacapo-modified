@@ -32,15 +32,12 @@ namespace {
 struct ConstantOpLowering
     : public OpConversionPattern<hecate::earth::ConstantOp> {
   using OpConversionPattern<hecate::earth::ConstantOp>::ConversionPattern;
-  ConstantOpLowering(mlir::TypeConverter &converter, MLIRContext *ctxt,
-                     int64_t init_level)
-      : OpConversionPattern<hecate::earth::ConstantOp>(converter, ctxt),
-        init_level(init_level) {}
+  ConstantOpLowering(mlir::TypeConverter &converter, MLIRContext *ctxt)
+      : OpConversionPattern<hecate::earth::ConstantOp>(converter, ctxt) {}
 
   LogicalResult
   matchAndRewrite(hecate::earth::ConstantOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override;
-  int64_t init_level;
 };
 
 struct MulOpLowering : public OpConversionPattern<hecate::earth::MulOp> {
@@ -152,19 +149,7 @@ ConstantOpLowering::matchAndRewrite(hecate::earth::ConstantOp op,
       op.getLoc(), op.getType().getShape(),
       getTypeConverter()->convertType(op.getType().getElementType()));
 
-  auto tt = op.getType()
-                .getElementType()
-                .dyn_cast<hecate::earth::HEScaleTypeInterface>();
-  if (hecate::earth::EarthDialect::bootstrapLevelLowerBound > 0) {
-    rewriter.replaceOpWithNewOp<ckks::EncodeOp>(
-        op, dst, adaptor.getValue().dyn_cast<IntegerAttr>().getInt(),
-        tt.getScale(), init_level - tt.getLevel());
-  } else {
-    rewriter.replaceOpWithNewOp<ckks::EncodeOp>(
-        op, dst, adaptor.getValue().dyn_cast<IntegerAttr>().getInt(),
-        tt.getScale(),
-        hecate::earth::EarthDialect::bootstrapLevelUpperBound - tt.getLevel());
-  }
+  rewriter.replaceOpWithNewOp<ckks::EncodeOp>(op, dst, adaptor.getValue());
   return success();
 }
 
@@ -175,18 +160,27 @@ ConstantOpLowering::matchAndRewrite(hecate::earth::ConstantOp op,
 LogicalResult
 MulOpLowering::matchAndRewrite(hecate::earth::MulOp op, OpAdaptor adaptor,
                                ConversionPatternRewriter &rewriter) const {
-  auto dst = rewriter.create<tensor::EmptyOp>(
-      op.getLoc(), op.getType().getShape(),
-      getTypeConverter()->convertType(op.getType().getElementType()));
+  auto resultType = getTypeConverter()
+                        ->convertType(op.getType().getElementType())
+                        .dyn_cast<ckks::PolyTypeInterface>();
 
-  if (ckks::getPolyType(adaptor.getLhs()).getNumPoly() > 1 &&
-      ckks::getPolyType(adaptor.getRhs()).getNumPoly() > 1) {
-    rewriter.replaceOpWithNewOp<ckks::MulCCOp>(op, dst, adaptor.getLhs(),
-                                               adaptor.getRhs());
-  } else if (ckks::getPolyType(adaptor.getLhs()).getNumPoly() == 1) {
+  if (ckks::getPolyType(adaptor.getLhs()).getComponents() > 1 &&
+      ckks::getPolyType(adaptor.getRhs()).getComponents() > 1) {
+    auto mulDst = rewriter.create<tensor::EmptyOp>(
+        op.getLoc(), op.getType().getShape(), resultType.switchComponents(3));
+    auto mul = rewriter.create<ckks::MulCCOp>(
+        op.getLoc(), mulDst, adaptor.getLhs(), adaptor.getRhs());
+    auto relinDst = rewriter.create<tensor::EmptyOp>(
+        op.getLoc(), op.getType().getShape(), resultType);
+    rewriter.replaceOpWithNewOp<ckks::RelinearizeOp>(op, relinDst, mul);
+  } else if (ckks::getPolyType(adaptor.getLhs()).getComponents() == 1) {
+    auto dst = rewriter.create<tensor::EmptyOp>(
+        op.getLoc(), op.getType().getShape(), resultType);
     rewriter.replaceOpWithNewOp<ckks::MulCPOp>(op, dst, adaptor.getRhs(),
                                                adaptor.getLhs());
   } else {
+    auto dst = rewriter.create<tensor::EmptyOp>(
+        op.getLoc(), op.getType().getShape(), resultType);
     rewriter.replaceOpWithNewOp<ckks::MulCPOp>(op, dst, adaptor.getLhs(),
                                                adaptor.getRhs());
   }
@@ -204,11 +198,11 @@ AddOpLowering::matchAndRewrite(hecate::earth::AddOp op, OpAdaptor adaptor,
       op.getLoc(), op.getType().getShape(),
       getTypeConverter()->convertType(op.getType().getElementType()));
 
-  if (ckks::getPolyType(adaptor.getLhs()).getNumPoly() > 1 &&
-      ckks::getPolyType(adaptor.getRhs()).getNumPoly() > 1) {
+  if (ckks::getPolyType(adaptor.getLhs()).getComponents() > 1 &&
+      ckks::getPolyType(adaptor.getRhs()).getComponents() > 1) {
     rewriter.replaceOpWithNewOp<ckks::AddCCOp>(op, dst, adaptor.getLhs(),
                                                adaptor.getRhs());
-  } else if (ckks::getPolyType(adaptor.getLhs()).getNumPoly() == 1) {
+  } else if (ckks::getPolyType(adaptor.getLhs()).getComponents() == 1) {
     rewriter.replaceOpWithNewOp<ckks::AddCPOp>(op, dst, adaptor.getRhs(),
                                                adaptor.getLhs());
   } else {
@@ -315,13 +309,7 @@ LogicalResult BootstrapOpLowering::matchAndRewrite(
                       .dyn_cast<ckks::PolyTypeInterface>();
   auto dst = rewriter.create<tensor::EmptyOp>(
       op.getLoc(), op.getType().getShape(), elemType);
-  auto tt = op.getType()
-                .getElementType()
-                .dyn_cast<hecate::earth::HEScaleTypeInterface>();
-
-  rewriter.replaceOpWithNewOp<ckks::BootstrapCOp>(
-      op, dst, adaptor.getValue(),
-      hecate::earth::EarthDialect::levelUpperBound - tt.getLevel());
+  rewriter.replaceOpWithNewOp<ckks::BootstrapCOp>(op, dst, adaptor.getValue());
   return success();
 }
 
@@ -390,7 +378,7 @@ void hecate::earth::populateEarthToCKKSConversionPatterns(
     mlir::MLIRContext *ctxt, mlir::TypeConverter &converter,
     mlir::RewritePatternSet &patterns, int64_t init_level) {
   // clang-format off
-  patterns.add<ConstantOpLowering> (converter, ctxt, init_level);
+  patterns.add<ConstantOpLowering> (converter, ctxt);
   patterns.add<
     MulOpLowering,
     AddOpLowering,

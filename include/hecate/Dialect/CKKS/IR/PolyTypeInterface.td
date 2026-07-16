@@ -1,65 +1,49 @@
-
-#ifndef HE_PARAMETER_INTERFACE
-#define HE_PARAMETER_INTERFACE
+#ifndef HECATE_CKKS_POLY_TYPE_INTERFACE
+#define HECATE_CKKS_POLY_TYPE_INTERFACE
 
 include "mlir/IR/OpBase.td"
-include "mlir/IR/OpBase.td"
-
 
 def PolyTypeInterface : TypeInterface<"PolyTypeInterface"> {
-
   let description = [{
-    A type interface for CKKS API level optimization.
-      Type that implement this interface can be analyzed and managed by CKKS API-level optimization.
+    Accesses the CKKS components, binary scale exponent and modulus-chain
+    level carried by a plaintext or ciphertext type.
   }];
   let cppNamespace = "::hecate::ckks";
   let methods = [
     InterfaceMethod<
-      /*desc=*/[{Get a number of polynomials in a given type.
-      }],
-    /*retType=*/"unsigned",
-    /*methodName=*/"getNumPoly"
-      >,
+      /*desc=*/[{Get the number of polynomial components.}],
+      /*retType=*/"unsigned",
+      /*methodName=*/"getComponents"
+    >,
     InterfaceMethod<
-      /*desc=*/[{Get a level of a given type.
-      }],
-    /*retType=*/"unsigned",
-    /*methodName=*/"getLevel"
-      >,
+      /*desc=*/[{Get the binary scale exponent.}],
+      /*retType=*/"unsigned",
+      /*methodName=*/"getScaleLog2"
+    >,
     InterfaceMethod<
-      /*desc=*/[{Get a level of a given type.
-      }],
-    /*retType=*/"::hecate::ckks::PolyTypeInterface",
-    /*methodName=*/"switchLevel",
-    /*args=*/(ins "unsigned":$level)
-      >,
+      /*desc=*/[{Get the RuntimePlan-direction modulus-chain level.}],
+      /*retType=*/"unsigned",
+      /*methodName=*/"getLevel"
+    >,
     InterfaceMethod<
-      /*desc=*/[{Get a level of a given type.
-      }],
-    /*retType=*/"::hecate::ckks::PolyTypeInterface",
-    /*methodName=*/"switchNumPoly",
-    /*args=*/(ins "unsigned":$num_poly)
-      >,
-    ];
-}
-
-def HEVMOpInterface : OpInterface<"HEVMOpInterface"> {
-  let description = [{
-    A printer interface for HEVM API .
-      Operations that implement this interface can be printed to HEVM.
-  }];
-  let cppNamespace = "::hecate::ckks";
-  let methods = [
+      /*desc=*/[{Return the same type at another level.}],
+      /*retType=*/"::hecate::ckks::PolyTypeInterface",
+      /*methodName=*/"switchLevel",
+      /*args=*/(ins "unsigned":$level)
+    >,
     InterfaceMethod<
-      /*desc=*/[{Get a number of polynomials in a given type.
-      }],
-    /*retType=*/"HEVMOperation",
-    /*methodName=*/"getHEVMOperation",
-    /*args=*/(ins "llvm::DenseMap<mlir::Value, int64_t>":$plainMap, "llvm::DenseMap<mlir::Value, int64_t>":$cipherMap)
-      >
+      /*desc=*/[{Return the same type with another component count.}],
+      /*retType=*/"::hecate::ckks::PolyTypeInterface",
+      /*methodName=*/"switchComponents",
+      /*args=*/(ins "unsigned":$components)
+    >,
+    InterfaceMethod<
+      /*desc=*/[{Return the same type with another binary scale exponent.}],
+      /*retType=*/"::hecate::ckks::PolyTypeInterface",
+      /*methodName=*/"switchScaleLog2",
+      /*args=*/(ins "unsigned":$scale_log2)
+    >
   ];
 }
-
-
 
 #endif

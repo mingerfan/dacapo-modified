@@ -123,12 +123,10 @@ void initFunc(Context *ctxt, funcID fun, valueID *args, size_t len) {
 char *save(Context *c, char *const_name, char *mlir_name) {
   c->mod->getOperation()->setAttr(mlir::SymbolTable::getSymbolAttrName(),
                                   c->builder->getStringAttr(mlir_name));
-  std::string s_const_name(const_name);
+  (void)const_name;
   mlir::PassManager pm(&c->ctxt);
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
-  pm.addNestedPass<func::FuncOp>(
-      earth::createElideConstant({s_const_name + "/"}));
   pm.addNestedPass<func::FuncOp>(earth::createPrivatizeConstant());
   pm.addPass(createCanonicalizerPass());
 

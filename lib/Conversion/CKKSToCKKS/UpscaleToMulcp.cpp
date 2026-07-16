@@ -53,21 +53,27 @@ LogicalResult
 UpscaleCOpLowering::matchAndRewrite(hecate::ckks::UpscaleCOp op,
                                     OpAdaptor adaptor,
                                     ConversionPatternRewriter &rewriter) const {
-  auto tt =
-      op.getType().getElementType().dyn_cast<hecate::ckks::PolyTypeInterface>();
+  auto srcType = adaptor.getSrc()
+                     .getType()
+                     .cast<RankedTensorType>()
+                     .getElementType()
+                     .cast<hecate::ckks::PolyTypeInterface>();
+  auto plainType = srcType.switchComponents(1).switchScaleLog2(
+      static_cast<unsigned>(adaptor.getUpFactor()));
 
   auto dst = rewriter.create<tensor::EmptyOp>(
-      op.getLoc(), op.getType().getShape(), tt.switchNumPoly(1));
+      op.getLoc(), op.getType().getShape(), plainType);
 
-  auto rhs = rewriter.create<ckks::EncodeOp>(
-      op.getLoc(), dst, -1, adaptor.getUpFactor(), tt.getLevel());
+  auto payloadType =
+      RankedTensorType::get({hecate::earth::EarthDialect::polynomialDegree / 2},
+                            rewriter.getF64Type());
+  auto payload =
+      DenseElementsAttr::get(payloadType, rewriter.getF64FloatAttr(1.0));
+
+  auto rhs = rewriter.create<ckks::EncodeOp>(op.getLoc(), dst, payload);
 
   rewriter.replaceOpWithNewOp<ckks::MulCPOp>(op, adaptor.getDst(),
                                              adaptor.getSrc(), rhs);
-
-  /* rewriter.replaceOpWithNewOp<ckks::UpscaleCOp>(op, dst, adaptor.getValue(),
-   */
-  /*                                               adaptor.getUpFactor()); */
   return success();
 }
 
@@ -84,8 +90,6 @@ struct UpscaleToMulcpConversion
 
   void runOnOperation() override {
     ConversionTarget target(getContext());
-
-    auto func = getOperation();
 
     mlir::RewritePatternSet patterns(&getContext());
 

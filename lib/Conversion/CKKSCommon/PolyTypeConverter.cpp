@@ -6,12 +6,7 @@ using namespace mlir;
 using namespace hecate;
 
 PolyTypeConverter::PolyTypeConverter(int64_t base_level)
-    //: base_level(hecate::earth::EarthDialect::bootstrapLevelUpperBound) {
     : base_level(base_level) {
-  if ( hecate::earth::EarthDialect::bootstrapLevelUpperBound >= 3)
-  {
-    base_level = hecate::earth::EarthDialect::bootstrapLevelUpperBound;
-  }
   addConversion([&](mlir::Type t) { return t; });
   addConversion([&](mlir::FunctionType t) { return convertFunctionType(t); });
   addConversion([&](mlir::RankedTensorType t) { return convertTensorType(t); });
@@ -44,16 +39,10 @@ mlir::Type PolyTypeConverter::convertTensorType(mlir::TensorType t) {
 }
 
 mlir::Type PolyTypeConverter::convertCipherType(hecate::earth::CipherType t) {
-  return hecate::ckks::PolyType::get(t.getContext(), 2,
+  return hecate::ckks::PolyType::get(t.getContext(), 2, t.getScale(),
                                      base_level - t.getLevel());
 }
 mlir::Type PolyTypeConverter::convertPlainType(hecate::earth::PlainType t) {
-  return hecate::ckks::PolyType::get(t.getContext(), 1,
+  return hecate::ckks::PolyType::get(t.getContext(), 1, t.getScale(),
                                      base_level - t.getLevel());
 }
-/* mlir::Type */
-/* PolyTypeConverter::convertScaleType(hecate::earth::HEScaleTypeInterface t) {
- */
-/*   return hecate::ckks::PolyType::get(t.getContext(), t.isCipher() ? 2 : 1, */
-/*                                      base_level - t.getLevel()); */
-/* } */

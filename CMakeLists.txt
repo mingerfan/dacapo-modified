@@ -30,6 +30,9 @@ project(HECATE
   VERSION ${HECATE_VERSION_MAJOR}.${HECATE_VERSION_MINOR}.${HECATE_VERSION_PATCH}
   LANGUAGES CXX C)
 
+option(BUILD_TESTING "Build Dacapo tests" OFF)
+include(CTest)
+
 
 # CXX BUILD SETTING
 
@@ -128,5 +131,8 @@ add_definitions (-DMEM_CHECK)
 add_subdirectory (include/hecate)
 add_subdirectory (lib)
 add_subdirectory (tools)
+if (BUILD_TESTING)
+  add_subdirectory(test)
+endif()
 
 # get_target_property(HEAAN_INCLUDE_DIR HEaaN::HEaaN INTERFACE_INCLUDE_DIRECTORIES)
