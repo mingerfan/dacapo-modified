@@ -8,6 +8,7 @@ build-debug
 dot
 *.bc
 *.mlir
+!test/runtime-plan/*.mlir
 *.hevm
 *.o
 *.so
@@ -35,3 +36,4 @@ result
 /command.json
 /compile_flags.txt
 /.clangd
+/review_artifacts/

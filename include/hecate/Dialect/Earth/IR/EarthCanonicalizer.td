@@ -9,6 +9,7 @@ include "hecate/Dialect/Earth/IR/EarthOps.td"
 
 
 def isZero : Constraint<CPred<"$0.dyn_cast<IntegerAttr>().getInt() == 0"> , "check zero">;
+def isZeroRotateOffset : Constraint<CPred<"$0.size() == 1 && $0[0] == 0">, "check a single zero rotation offset">;
 def isAllZero : Constraint<CPred<"$0.isa<DenseElementsAttr>() && llvm::all_of($0.dyn_cast<DenseElementsAttr>().getValues<double>(),[&](double d){ return d == 0;})">, "check all zero">;
 def isAllOne : Constraint<CPred<"$0.isa<DenseElementsAttr>() && llvm::all_of($0.dyn_cast<DenseElementsAttr>().getValues<double>(),[&](double d){ return d == 1.0;})">, "check all one">;
 def isAllMinusOne : Constraint<CPred<"$0.isa<DenseElementsAttr>() && llvm::all_of($0.dyn_cast<DenseElementsAttr>().getValues<double>(),[&](double d){ return d == -1.0;})">, "check all minus one">;
@@ -18,6 +19,7 @@ def structureNotFixed : Constraint<CPred<"!$0.getDefiningOp()->getAttr(\"sm_fixe
 
 def ZeroUpscalePattern : Pat<(UpscaleOp $arg, $val), (replaceWithValue $arg), [(isZero $val)]>;
 def ZeroModswitchPattern : Pat<(ModswitchOp $arg, $val), (replaceWithValue $arg), [(isZero $val)]>;
+def ZeroRotatePattern : Pat<(RotateOp $arg, $offset), (replaceWithValue $arg), [(isZeroRotateOffset $offset)]>;
 def AddZeroPattern : Pat<(AddOp (either $lhs, (ConstantOp $val, $dat2)) ), (replaceWithValue $lhs), [(isAllZero $val)]>;
 def MulZeroPattern : Pat<(MulOp (either $lhs, (ConstantOp:$res $val, $dat2)) ), (replaceWithValue $res), [(isAllZero $val)]>;
 def MulOnePattern : Pat<(MulOp (either $lhs, (ConstantOp:$res $val, $dat2)) ), (replaceWithValue $lhs), [(isAllOne $val)]>;

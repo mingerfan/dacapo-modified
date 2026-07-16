@@ -12,7 +12,7 @@ import numpy as np
 import numpy.ctypeslib as npcl
 
 hecate_dir = os.environ["HECATE"]
-hecateBuild = hecate_dir+"/build"
+hecateBuild = os.environ.get("HECATE_BUILD", hecate_dir+"/build")
 heaan_keyset = "/heaan_keyset"
 libpath = hecateBuild + "/lib/"
 lt = ctypes.CDLL(libpath+"libHecateFrontend.so")

@@ -141,6 +141,16 @@ def main() -> None:
         }
         assert compute["execution"][4]["attrs"] == {"target_level": 3}
 
+        zero_rotate, _ = run_pipeline(
+            args.hecate_opt, args.source_dir, temp,
+            "zero-rotate", "zero_rotate", 6,
+            ["canonicalize", "convert-earth-to-ckks"],
+        )
+        assert len(zero_rotate["execution"]) == 1
+        assert zero_rotate["execution"][0]["op"] == "rotate"
+        assert zero_rotate["execution"][0]["attrs"] == {"steps": 1}
+        assert zero_rotate["execution"][0]["inputs"] == ["0"]
+
 
 if __name__ == "__main__":
     main()

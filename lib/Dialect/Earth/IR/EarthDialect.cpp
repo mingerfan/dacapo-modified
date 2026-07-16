@@ -197,7 +197,7 @@ void hecate::earth::RescaleOp::getCanonicalizationPatterns(
 }
 void hecate::earth::RotateOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
-  /* patterns.add<RotateOffsetModuloPattern>(context); */
+  patterns.add<ZeroRotatePattern>(context);
 }
 
 ::mlir::LogicalResult hecate::earth::RescaleOp::inferReturnTypes(
