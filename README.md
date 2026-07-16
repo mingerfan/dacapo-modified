@@ -43,6 +43,10 @@ cmake --preset nix
 cmake --build --preset nix
 ```
 
+The configure step writes `build/nix/compile_commands.json`, and the build step
+generates the TableGen `.inc` headers used by clangd. Restart clangd after the
+first build if the editor opened the project earlier.
+
 The same compiler-only build can be produced directly with `nix build`.
 `SEAL_HEVM` and `HEAAN_HEVM` are legacy optional runtime adapters. Enable them with
 `-DHECATE_ENABLE_SEAL_RUNTIME=ON` or

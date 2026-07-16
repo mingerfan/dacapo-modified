@@ -114,6 +114,21 @@ include_directories(${PROJECT_BINARY_DIR}/include)
 include_directories(${PROTOBUF_INCLUDE_DIR})
 # include_directories(${HEAAN_INCLUDE_DIR})
 
+# Nix compiler wrappers inject dependency, standard-library, resource, and libc
+# include paths at invocation time. CMake classifies them as implicit and omits
+# them from compile_commands.json, but clangd does not execute the wrapper to
+# recover those flags. Keep explicit copies in the compilation database.
+if(DEFINED ENV{IN_NIX_SHELL})
+  foreach(HECATE_TOOLING_INCLUDE_DIR IN LISTS CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES)
+    add_compile_options(
+      "$<$<COMPILE_LANGUAGE:CXX>:-isystem${HECATE_TOOLING_INCLUDE_DIR}>")
+  endforeach()
+  foreach(HECATE_TOOLING_INCLUDE_DIR IN LISTS CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES)
+    add_compile_options(
+      "$<$<COMPILE_LANGUAGE:C>:-isystem${HECATE_TOOLING_INCLUDE_DIR}>")
+  endforeach()
+endif()
+
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 
