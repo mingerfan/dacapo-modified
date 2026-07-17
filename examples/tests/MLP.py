@@ -22,6 +22,15 @@ def preprocess():
     x = x+b
     return np.array(x)
 
+def pack_input(x):
+    packed = []
+    for c in range(8):
+        block = list(x[c * 100:(c + 1) * 100])
+        block += [0.0 for _ in range(100 - len(block))]
+        packed += block
+        packed += block
+    return np.array(packed)
+
 def process(x) : 
     model = torch.load(str(source_dir)+"/../data/mlp.model", map_location=torch.device('cpu'))
     W1 = model["linear1.weight"].cpu().detach().numpy()
@@ -68,11 +77,11 @@ if __name__ == "__main__" :
 
     input_dat = preprocess()
     reference = postprocess(process(input_dat))
-    [hevm.setInput(i, dat) for i, dat in enumerate([input_dat])]
+    [hevm.setInput(i, dat) for i, dat in enumerate([pack_input(input_dat[:784])])]
     timer = time.perf_counter_ns()
     hevm.run()
     timer = time.perf_counter_ns() -timer
-    [hevm.setInput(i, dat) for i, dat in enumerate([input_dat])]
+    [hevm.setInput(i, dat) for i, dat in enumerate([pack_input(input_dat[:784])])]
     timer = time.perf_counter_ns()
     hevm.run()
     timer = time.perf_counter_ns() -timer
