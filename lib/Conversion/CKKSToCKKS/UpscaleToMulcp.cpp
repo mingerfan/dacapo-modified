@@ -5,12 +5,8 @@
 
 #include "hecate/Dialect/CKKS/IR/CKKSOps.h"
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
-#include "mlir/Conversion/ArithCommon/AttrToLLVMConverter.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/IR/TypeUtilities.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
-#include <type_traits>
 
 namespace hecate {
 #define GEN_PASS_DEF_UPSCALETOMULCPCONVERSION
@@ -60,9 +56,8 @@ UpscaleCOpLowering::matchAndRewrite(hecate::ckks::UpscaleCOp op,
                      .cast<hecate::ckks::PolyTypeInterface>();
   auto plainType = srcType.switchComponents(1).switchScaleLog2(
       static_cast<unsigned>(adaptor.getUpFactor()));
-
-  auto dst = rewriter.create<tensor::EmptyOp>(
-      op.getLoc(), op.getType().getShape(), plainType);
+  auto plainTensorType =
+      RankedTensorType::get(op.getType().getShape(), plainType);
 
   auto payloadType =
       RankedTensorType::get({hecate::earth::EarthDialect::polynomialDegree / 2},
@@ -70,10 +65,11 @@ UpscaleCOpLowering::matchAndRewrite(hecate::ckks::UpscaleCOp op,
   auto payload =
       DenseElementsAttr::get(payloadType, rewriter.getF64FloatAttr(1.0));
 
-  auto rhs = rewriter.create<ckks::EncodeOp>(op.getLoc(), dst, payload);
+  auto rhs =
+      rewriter.create<ckks::EncodeOp>(op.getLoc(), plainTensorType, payload);
 
-  rewriter.replaceOpWithNewOp<ckks::MulCPOp>(op, adaptor.getDst(),
-                                             adaptor.getSrc(), rhs);
+  rewriter.replaceOpWithNewOp<ckks::MulCPOp>(op, op.getType(), adaptor.getSrc(),
+                                             rhs);
   return success();
 }
 
@@ -95,7 +91,6 @@ struct UpscaleToMulcpConversion
 
     target.addIllegalOp<hecate::ckks::UpscaleCOp>();
     target.addLegalDialect<hecate::ckks::CKKSDialect>();
-    target.addLegalDialect<tensor::TensorDialect>();
     target.addLegalDialect<func::FuncDialect>();
 
     hecate::ckks::populateUpscaleToMulcpConversionPatterns(&getContext(),

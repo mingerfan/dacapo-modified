@@ -46,6 +46,7 @@ def run_pipeline(hecate_opt: Path, source_dir: Path, temp: Path,
         cwd=source_dir,
         check=True,
     )
+    assert "tensor.empty" not in output_mlir.read_text(encoding="utf-8")
     plan_path = Path(f"{prefix}.{function}.runtime-plan.json")
     return json.loads(plan_path.read_text(encoding="utf-8")), output_mlir
 
@@ -107,6 +108,32 @@ def main() -> None:
         )
         assert retired.returncode != 0
         assert "HEVM emission has been retired" in retired.stderr
+
+        invalid_rotate = subprocess.run(
+            [
+                str(args.hecate_opt),
+                str(args.source_dir / "test/runtime-plan/invalid-rotate-plaintext.mlir"),
+                "-o", str(temp / "invalid-rotate-plaintext.mlir"),
+            ],
+            cwd=args.source_dir,
+            text=True,
+            capture_output=True,
+        )
+        assert invalid_rotate.returncode != 0
+        assert "source must be a two-component ciphertext" in invalid_rotate.stderr
+
+        invalid_relinearize = subprocess.run(
+            [
+                str(args.hecate_opt),
+                str(args.source_dir / "test/runtime-plan/invalid-relinearize.mlir"),
+                "-o", str(temp / "invalid-relinearize.mlir"),
+            ],
+            cwd=args.source_dir,
+            text=True,
+            capture_output=True,
+        )
+        assert invalid_relinearize.returncode != 0
+        assert "requires components 3 -> 2" in invalid_relinearize.stderr
 
         upscale, _ = run_pipeline(
             args.hecate_opt, args.source_dir, temp,

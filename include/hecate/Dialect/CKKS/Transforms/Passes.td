@@ -11,12 +11,6 @@ def RemoveLevel : Pass<"remove-level", "::mlir::func::FuncOp"> {
   }];
 }
 
-def ReuseBuffer : Pass<"reuse-buffer", "::mlir::func::FuncOp"> {
-  let summary = "Deprecated: reuse buffers for the retired HEVM path";
-  let description = [{
-  }];
-}
-
 def EmitHEVM : Pass<"emit-hevm", "::mlir::func::FuncOp"> {
   let summary = "Retired: HEVM emission is no longer supported";
   let description = [{

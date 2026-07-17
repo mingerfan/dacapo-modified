@@ -10,7 +10,7 @@ def EarthToCKKSConversion : Pass<"convert-earth-to-ckks", "::mlir::func::FuncOp"
     This pass converts supported Earth ops to CKKS dialect instructions.
   }];
   let constructor = "::hecate::earth::createEarthToCKKSConversionPass()";
-  let dependentDialects = ["hecate::earth::EarthDialect", "hecate::ckks::CKKSDialect", "mlir::tensor::TensorDialect"];
+  let dependentDialects = ["hecate::earth::EarthDialect", "hecate::ckks::CKKSDialect"];
   let options = [
   ];
 }
@@ -20,7 +20,7 @@ def UpscaleToMulcpConversion : Pass<"convert-upscale-to-mulcp", "::mlir::func::F
     This pass converts upscale ops to mulcp instructions.
   }];
   let constructor = "::hecate::ckks::createUpscaleToMulcpConversionPass()";
-  let dependentDialects = ["hecate::ckks::CKKSDialect", "mlir::tensor::TensorDialect"];
+  let dependentDialects = ["hecate::ckks::CKKSDialect"];
   let options = [
   ];
 }

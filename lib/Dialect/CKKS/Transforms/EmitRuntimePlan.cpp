@@ -1,7 +1,6 @@
 #include "hecate/Dialect/CKKS/IR/CKKSOps.h"
 #include "hecate/Dialect/CKKS/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "nlohmann/json.hpp"
 #include "llvm/ADT/ArrayRef.h"
@@ -226,7 +225,7 @@ struct RuntimePlanBuilder {
     }
 
     for (Operation &op : func.getBody().front()) {
-      if (isa<tensor::EmptyOp, func::ReturnOp>(op))
+      if (isa<func::ReturnOp>(op))
         continue;
       if (op.getNumRegions() != 0)
         return op.emitError(

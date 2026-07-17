@@ -8,6 +8,8 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include <cstdint>
+
 using namespace mlir;
 
 #include "hecate/Dialect/CKKS/IR/PolyTypeInterface.h"
@@ -104,172 +106,146 @@ void hecate::ckks::CKKSDialect::initialize() {
   mlir::RankedTensorType::attachInterface<PolyTypeTensorModel>(*getContext());
 }
 
-::mlir::LogicalResult hecate::ckks::EncodeOp::inferReturnTypes(
-    ::mlir::MLIRContext *context, ::std::optional<::mlir::Location> location,
-    ::mlir::ValueRange operands, ::mlir::DictionaryAttr attributes,
-    ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions,
-    ::llvm::SmallVectorImpl<::mlir::Type> &inferredReturnTypes) {
-
-  auto op = EncodeOpAdaptor(operands, attributes, properties, regions);
-  auto dPoly = ckks::getPolyType(op.getDst());
-  if (dPoly.getComponents() == 1) {
-    inferredReturnTypes.push_back(op.getDst().getType());
-    return ::mlir::success();
-  } else {
-    return ::mlir::failure();
-  }
+::mlir::LogicalResult hecate::ckks::EncodeOp::verify() {
+  if (ckks::getPolyType(getResult()).getComponents() != 1)
+    return emitOpError("result must be plaintext with one component");
+  return ::mlir::success();
 }
 
-::mlir::LogicalResult hecate::ckks::RescaleCOp::inferReturnTypes(
-    ::mlir::MLIRContext *context, ::std::optional<::mlir::Location> location,
-    ::mlir::ValueRange operands, ::mlir::DictionaryAttr attributes,
-    ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions,
-    ::llvm::SmallVectorImpl<::mlir::Type> &inferredReturnTypes) {
-  auto op = RescaleCOpAdaptor(operands, attributes, properties, regions);
-  auto dPoly = ckks::getPolyType(op.getDst());
-  auto lPoly = ckks::getPolyType(op.getSrc());
-  if (dPoly.getComponents() == lPoly.getComponents() &&
-      (dPoly.getLevel() == lPoly.getLevel() - 1 || dPoly.getLevel() == 0)) {
-    inferredReturnTypes.push_back(op.getDst().getType());
-    return ::mlir::success();
-  } else {
-    return ::mlir::failure();
-  }
+::mlir::LogicalResult hecate::ckks::RotateCOp::verify() {
+  if (ckks::getPolyType(getSrc()).getComponents() != 2)
+    return emitOpError("source must be a two-component ciphertext");
+  if (getOffset().size() != 1 || getOffset()[0] == 0)
+    return emitOpError("requires exactly one nonzero rotation step");
+  return ::mlir::success();
 }
 
-::mlir::LogicalResult hecate::ckks::ModswitchCOp::inferReturnTypes(
-    ::mlir::MLIRContext *context, ::std::optional<::mlir::Location> location,
-    ::mlir::ValueRange operands, ::mlir::DictionaryAttr attributes,
-    ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions,
-    ::llvm::SmallVectorImpl<::mlir::Type> &inferredReturnTypes) {
-  auto op = ModswitchCOpAdaptor(operands, attributes, properties, regions);
-  auto dPoly = ckks::getPolyType(op.getDst());
-  auto lPoly = ckks::getPolyType(op.getSrc());
-  if (dPoly.getComponents() == lPoly.getComponents() &&
-      (dPoly.getLevel() == lPoly.getLevel() - op.getDownFactor() ||
-       dPoly.getLevel() == 0)) {
-    inferredReturnTypes.push_back(op.getDst().getType());
-    return ::mlir::success();
-  } else {
-    return ::mlir::failure();
-  }
+::mlir::LogicalResult hecate::ckks::NegateCOp::verify() {
+  if (ckks::getPolyType(getSrc()).getComponents() < 2)
+    return emitOpError("source must be ciphertext");
+  return ::mlir::success();
 }
 
-::mlir::LogicalResult hecate::ckks::UpscaleCOp::inferReturnTypes(
-    ::mlir::MLIRContext *context, ::std::optional<::mlir::Location> location,
-    ::mlir::ValueRange operands, ::mlir::DictionaryAttr attributes,
-    ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions,
-    ::llvm::SmallVectorImpl<::mlir::Type> &inferredReturnTypes) {
-  auto op = UpscaleCOpAdaptor(operands, attributes, properties, regions);
-  auto dPoly = ckks::getPolyType(op.getDst());
-  auto sPoly = ckks::getPolyType(op.getSrc());
-  if (dPoly.getComponents() == sPoly.getComponents() &&
-      dPoly.getLevel() == sPoly.getLevel() &&
-      dPoly.getScaleLog2() == sPoly.getScaleLog2() + op.getUpFactor()) {
-    inferredReturnTypes.push_back(op.getDst().getType());
-    return ::mlir::success();
-  }
-  return ::mlir::failure();
+::mlir::LogicalResult hecate::ckks::RelinearizeOp::verify() {
+  auto result = ckks::getPolyType(getResult());
+  auto src = ckks::getPolyType(getSrc());
+  if (src.getComponents() != 3 || result.getComponents() != 2 ||
+      result.getLevel() != src.getLevel() ||
+      result.getScaleLog2() != src.getScaleLog2())
+    return emitOpError(
+        "requires components 3 -> 2 with unchanged scale and level");
+  return ::mlir::success();
 }
 
-::mlir::LogicalResult hecate::ckks::BootstrapCOp::inferReturnTypes(
-    ::mlir::MLIRContext *context, ::std::optional<::mlir::Location> location,
-    ::mlir::ValueRange operands, ::mlir::DictionaryAttr attributes,
-    ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions,
-    ::llvm::SmallVectorImpl<::mlir::Type> &inferredReturnTypes) {
-  auto op = BootstrapCOpAdaptor(operands, attributes, properties, regions);
-  auto dPoly = ckks::getPolyType(op.getDst());
-  auto lPoly = ckks::getPolyType(op.getSrc());
-  if (dPoly.getComponents() == lPoly.getComponents()) {
-    inferredReturnTypes.push_back(op.getDst().getType());
-    return ::mlir::success();
-  } else {
-    return ::mlir::failure();
-  }
+::mlir::LogicalResult hecate::ckks::RescaleCOp::verify() {
+  auto result = ckks::getPolyType(getResult());
+  auto src = ckks::getPolyType(getSrc());
+  const bool validLevel =
+      result.getLevel() < src.getLevel() &&
+      (result.getLevel() == 0 || result.getLevel() == src.getLevel() - 1);
+  if (src.getComponents() < 2 ||
+      result.getComponents() != src.getComponents() || !validLevel)
+    return emitOpError("requires ciphertext components to remain unchanged and "
+                       "level to decrease");
+  return ::mlir::success();
 }
 
-::mlir::LogicalResult hecate::ckks::AddCPOp::inferReturnTypes(
-    ::mlir::MLIRContext *context, ::std::optional<::mlir::Location> location,
-    ::mlir::ValueRange operands, ::mlir::DictionaryAttr attributes,
-    ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions,
-    ::llvm::SmallVectorImpl<::mlir::Type> &inferredReturnTypes) {
-  auto op = AddCPOpAdaptor(operands, attributes, properties, regions);
-  auto dPoly = ckks::getPolyType(op.getDst());
-  auto lPoly = ckks::getPolyType(op.getLhs());
-  auto rPoly = ckks::getPolyType(op.getRhs());
-  if (std::min(lPoly.getComponents(), rPoly.getComponents()) == 1 &&
-      dPoly.getComponents() ==
-          std::max(rPoly.getComponents(), lPoly.getComponents()) &&
-      lPoly.getLevel() == rPoly.getLevel() &&
-      dPoly.getLevel() == lPoly.getLevel()) {
-    inferredReturnTypes.push_back(op.getDst().getType());
-    return ::mlir::success();
-  } else {
-    return ::mlir::failure();
-  }
+::mlir::LogicalResult hecate::ckks::ModswitchCOp::verify() {
+  auto result = ckks::getPolyType(getResult());
+  auto src = ckks::getPolyType(getSrc());
+  if (getDownFactor() <= 0)
+    return emitOpError("downFactor must be positive");
+  const uint64_t downFactor = static_cast<uint64_t>(getDownFactor());
+  const bool validLevel = result.getLevel() < src.getLevel() &&
+                          (result.getLevel() == 0 ||
+                           (downFactor <= src.getLevel() &&
+                            result.getLevel() == src.getLevel() - downFactor));
+  if (src.getComponents() < 2 ||
+      result.getComponents() != src.getComponents() ||
+      result.getScaleLog2() != src.getScaleLog2() || !validLevel)
+    return emitOpError("requires unchanged ciphertext components and scale "
+                       "with the requested lower level");
+  return ::mlir::success();
 }
 
-::mlir::LogicalResult hecate::ckks::MulCPOp::inferReturnTypes(
-    ::mlir::MLIRContext *context, ::std::optional<::mlir::Location> location,
-    ::mlir::ValueRange operands, ::mlir::DictionaryAttr attributes,
-    ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions,
-    ::llvm::SmallVectorImpl<::mlir::Type> &inferredReturnTypes) {
-  auto op = MulCPOpAdaptor(operands, attributes, properties, regions);
-  auto dPoly = ckks::getPolyType(op.getDst());
-  auto lPoly = ckks::getPolyType(op.getLhs());
-  auto rPoly = ckks::getPolyType(op.getRhs());
-
-  if (std::min(lPoly.getComponents(), rPoly.getComponents()) == 1 &&
-      dPoly.getComponents() ==
-          std::max(lPoly.getComponents(), rPoly.getComponents()) &&
-      lPoly.getLevel() == rPoly.getLevel() &&
-      lPoly.getLevel() == dPoly.getLevel() &&
-      dPoly.getScaleLog2() == lPoly.getScaleLog2() + rPoly.getScaleLog2()) {
-    inferredReturnTypes.push_back(op.getDst().getType());
-    return ::mlir::success();
-  } else {
-    return ::mlir::failure();
-  }
+::mlir::LogicalResult hecate::ckks::UpscaleCOp::verify() {
+  auto result = ckks::getPolyType(getResult());
+  auto src = ckks::getPolyType(getSrc());
+  if (getUpFactor() <= 0)
+    return emitOpError("upFactor must be positive");
+  const uint64_t expectedScale =
+      static_cast<uint64_t>(src.getScaleLog2()) + getUpFactor();
+  if (src.getComponents() < 2 ||
+      result.getComponents() != src.getComponents() ||
+      result.getLevel() != src.getLevel() ||
+      result.getScaleLog2() != expectedScale)
+    return emitOpError("requires unchanged ciphertext components and level "
+                       "with the requested higher scale");
+  return ::mlir::success();
 }
 
-::mlir::LogicalResult hecate::ckks::MulCCOp::inferReturnTypes(
-    ::mlir::MLIRContext *context, ::std::optional<::mlir::Location> location,
-    ::mlir::ValueRange operands, ::mlir::DictionaryAttr attributes,
-    ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions,
-    ::llvm::SmallVectorImpl<::mlir::Type> &inferredReturnTypes) {
-  auto op = MulCCOpAdaptor(operands, attributes, properties, regions);
-  auto dPoly = ckks::getPolyType(op.getDst());
-  auto lPoly = ckks::getPolyType(op.getLhs());
-  auto rPoly = ckks::getPolyType(op.getRhs());
-
-  if (lPoly.getComponents() >= 2 && rPoly.getComponents() >= 2 &&
-      dPoly.getComponents() ==
-          lPoly.getComponents() + rPoly.getComponents() - 1 &&
-      lPoly.getLevel() == rPoly.getLevel() &&
-      dPoly.getLevel() == lPoly.getLevel() &&
-      dPoly.getScaleLog2() == lPoly.getScaleLog2() + rPoly.getScaleLog2()) {
-    inferredReturnTypes.push_back(op.getDst().getType());
-    return ::mlir::success();
-  }
-  return ::mlir::failure();
+::mlir::LogicalResult hecate::ckks::BootstrapCOp::verify() {
+  auto result = ckks::getPolyType(getResult());
+  auto src = ckks::getPolyType(getSrc());
+  if (src.getComponents() < 2 || result.getComponents() != src.getComponents())
+    return emitOpError("requires ciphertext input and unchanged components");
+  return ::mlir::success();
 }
 
-::mlir::LogicalResult hecate::ckks::RelinearizeOp::inferReturnTypes(
-    ::mlir::MLIRContext *context, ::std::optional<::mlir::Location> location,
-    ::mlir::ValueRange operands, ::mlir::DictionaryAttr attributes,
-    ::mlir::OpaqueProperties properties, ::mlir::RegionRange regions,
-    ::llvm::SmallVectorImpl<::mlir::Type> &inferredReturnTypes) {
-  auto op = RelinearizeOpAdaptor(operands, attributes, properties, regions);
-  auto dPoly = ckks::getPolyType(op.getDst());
-  auto sPoly = ckks::getPolyType(op.getSrc());
+::mlir::LogicalResult hecate::ckks::AddCCOp::verify() {
+  if (ckks::getPolyType(getLhs()).getComponents() < 2)
+    return emitOpError("operands and result must be ciphertext");
+  return ::mlir::success();
+}
 
-  if (sPoly.getComponents() == 3 && dPoly.getComponents() == 2 &&
-      dPoly.getLevel() == sPoly.getLevel() &&
-      dPoly.getScaleLog2() == sPoly.getScaleLog2()) {
-    inferredReturnTypes.push_back(op.getDst().getType());
-    return ::mlir::success();
-  }
-  return ::mlir::failure();
+::mlir::LogicalResult hecate::ckks::AddCPOp::verify() {
+  auto result = ckks::getPolyType(getResult());
+  auto lhs = ckks::getPolyType(getLhs());
+  auto rhs = ckks::getPolyType(getRhs());
+  if (lhs.getComponents() < 2 || rhs.getComponents() != 1 ||
+      lhs.getLevel() != rhs.getLevel() ||
+      lhs.getScaleLog2() != rhs.getScaleLog2() ||
+      result.getComponents() != lhs.getComponents() ||
+      result.getLevel() != lhs.getLevel() ||
+      result.getScaleLog2() != lhs.getScaleLog2())
+    return emitOpError("requires ciphertext lhs, plaintext rhs, and unchanged "
+                       "output metadata");
+  return ::mlir::success();
+}
+
+::mlir::LogicalResult hecate::ckks::MulCCOp::verify() {
+  auto result = ckks::getPolyType(getResult());
+  auto lhs = ckks::getPolyType(getLhs());
+  auto rhs = ckks::getPolyType(getRhs());
+  if (lhs.getComponents() < 2 || rhs.getComponents() < 2)
+    return emitOpError("operands must be ciphertext");
+  const uint64_t expectedComponents =
+      static_cast<uint64_t>(lhs.getComponents()) + rhs.getComponents() - 1;
+  const uint64_t expectedScale =
+      static_cast<uint64_t>(lhs.getScaleLog2()) + rhs.getScaleLog2();
+  if (lhs.getLevel() != rhs.getLevel() ||
+      result.getComponents() != expectedComponents ||
+      result.getLevel() != lhs.getLevel() ||
+      result.getScaleLog2() != expectedScale)
+    return emitOpError("requires ciphertext operands with matching levels and "
+                       "multiplied output metadata");
+  return ::mlir::success();
+}
+
+::mlir::LogicalResult hecate::ckks::MulCPOp::verify() {
+  auto result = ckks::getPolyType(getResult());
+  auto lhs = ckks::getPolyType(getLhs());
+  auto rhs = ckks::getPolyType(getRhs());
+  const uint64_t expectedScale =
+      static_cast<uint64_t>(lhs.getScaleLog2()) + rhs.getScaleLog2();
+  if (lhs.getComponents() < 2 || rhs.getComponents() != 1 ||
+      lhs.getLevel() != rhs.getLevel() ||
+      result.getComponents() != lhs.getComponents() ||
+      result.getLevel() != lhs.getLevel() ||
+      result.getScaleLog2() != expectedScale)
+    return emitOpError("requires ciphertext lhs, plaintext rhs, and multiplied "
+                       "output metadata");
+  return ::mlir::success();
 }
 
 hecate::ckks::PolyTypeInterface
