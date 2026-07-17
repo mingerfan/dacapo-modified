@@ -76,15 +76,23 @@ def load_bundle(plan: dict, directory: Path) -> tuple[dict, dict[str, bytes]]:
 
 
 def run_placement_pipeline(hecate_opt: Path, source_dir: Path, temp: Path,
-                           device_counts: str, plan_id: int) -> tuple[dict, str]:
+                           device_counts: str, plan_id: int,
+                           fixture: str = "placement-fanout",
+                           function: str = "placement_fanout",
+                           boot_profile: str | None = None) -> tuple[dict, str]:
     spec_path = source_dir / "test/runtime-plan/placement-operator-spec.json"
     spec_digest = "sha256:" + hashlib.sha256(spec_path.read_bytes()).hexdigest()
-    prefix = temp / f"placement-{device_counts}"
+    prefix = temp / f"{fixture}-{device_counts}"
+    boot_option = f" boot-profile={boot_profile}" if boot_profile else ""
+    emit_boot_option = (
+        f" boot-profile={boot_profile} boot-implementation=decrypt_reencrypt"
+        if boot_profile else ""
+    )
     placement = (
         "assign-ckks-placement{"
         f"device-counts={device_counts} operator-spec={spec_path} "
         "intra-rank-communication-cost=10 "
-        "inter-rank-communication-cost=20}"
+        f"inter-rank-communication-cost=20{boot_option}}}"
     )
     emit = (
         "emit-runtime-plan{"
@@ -92,13 +100,13 @@ def run_placement_pipeline(hecate_opt: Path, source_dir: Path, temp: Path,
         "target-id=dacapo-placement-test capability-version=1 "
         "operator-spec-id=dacapo-placement-test-v1 "
         f"operator-spec-version=1 operator-spec-sha256={spec_digest} "
-        "context-id=test-context device-count=0 ntt=true}"
+        f"context-id=test-context device-count=0 ntt=true{emit_boot_option}}}"
     )
-    output = temp / f"placement-{device_counts}.mlir"
+    output = temp / f"{fixture}-{device_counts}.mlir"
     subprocess.run(
         [
             str(hecate_opt),
-            str(source_dir / "test/runtime-plan/placement-fanout.mlir"),
+            str(source_dir / f"test/runtime-plan/{fixture}.mlir"),
             f"-p=builtin.module(func.func({placement},"
             f"materialize-ckks-communication,{emit}))",
             "-o", str(output),
@@ -106,7 +114,7 @@ def run_placement_pipeline(hecate_opt: Path, source_dir: Path, temp: Path,
         cwd=source_dir,
         check=True,
     )
-    plan_path = Path(f"{prefix}.placement_fanout.runtime-plan.json")
+    plan_path = Path(f"{prefix}.{function}.runtime-plan.json")
     return json.loads(plan_path.read_text(encoding="utf-8")), output.read_text(
         encoding="utf-8"
     )
@@ -131,11 +139,12 @@ def verify_placement(plan: dict, mlir: str,
                for item in transfers)
     assert all(int(item["outputs"][0]) > 31 for item in transfers)
 
-    expected_places = {
-        (rank, device)
-        for rank, count in enumerate(expected_device_counts)
-        for device in range(count)
-    }
+    expected_places = set()
+    for rank, count in enumerate(expected_device_counts):
+        if count == 0:
+            expected_places.add((rank, -1))
+        else:
+            expected_places.update((rank, device) for device in range(count))
     compute_places = {place_key(item["place"]) for item in computes}
     assert compute_places == expected_places
     for item in computes:
@@ -151,7 +160,7 @@ def verify_placement(plan: dict, mlir: str,
             continue
         logical_id = int(re.search(r"dist.logical_id = ([0-9]+)", line).group(1))
         rank = int(re.search(r"dist.rank = ([0-9]+)", line).group(1))
-        device = int(re.search(r"dist.device = ([0-9]+)", line).group(1))
+        device = int(re.search(r"dist.device = (-?[0-9]+)", line).group(1))
         start = int(re.search(r"dist.schedule_start = ([0-9]+)", line).group(1))
         finish = int(re.search(r"dist.schedule_finish = ([0-9]+)", line).group(1))
         op = re.search(r'"ckks\.([a-z]+)"', line).group(1)
@@ -347,6 +356,22 @@ def main() -> None:
             args.hecate_opt, args.source_dir, temp, "8x8", 28
         )
         verify_placement(placement_2x8, placement_2x8_mlir, [8, 8])
+
+        placement_2cpu, placement_2cpu_mlir = run_placement_pipeline(
+            args.hecate_opt, args.source_dir, temp, "0x0", 38
+        )
+        verify_placement(placement_2cpu, placement_2cpu_mlir, [0, 0])
+
+        placement_boot, _ = run_placement_pipeline(
+            args.hecate_opt, args.source_dir, temp, "0x0", 48,
+            fixture="placement-boot", function="placement_boot",
+            boot_profile="test-boot",
+        )
+        assert placement_boot["target"]["device_counts"] == [0, 0]
+        assert placement_boot["execution"][0]["op"] == "boot"
+        assert placement_boot["execution"][0]["place"] == {
+            "kind": "host", "rank": 0
+        }
 
 
 if __name__ == "__main__":

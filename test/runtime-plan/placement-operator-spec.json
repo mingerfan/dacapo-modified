@@ -33,7 +33,24 @@
     "rescale": {"supported": true, "max_levels_per_op": 1, "latency_us_by_level": [300, 300, 300, 300, 300, 300], "noise_by_level": null},
     "mod_switch": {"supported": true, "latency_us_by_level": [200, 200, 200, 200, 200, 200], "noise_by_level": null},
     "relinearize": {"supported": true, "latency_us_by_level": [400, 400, 400, 400, 400, 400], "noise_by_level": null},
-    "boot": {"supported": false}
+    "boot": {"supported": true}
   },
-  "boot_profiles": []
+  "boot_profiles": [
+    {
+      "profile_id": "test-boot",
+      "implementation": "decrypt_reencrypt",
+      "input_level_min": 2,
+      "input_level_max": 5,
+      "input_components": 2,
+      "output_level": 5,
+      "output_scale_log2": 40,
+      "output_components": 2,
+      "latency_us_by_input_level": [0, 0, 500, 500, 500, 500],
+      "noise_by_input_level": null,
+      "host_requirements": {
+        "needs_secret_key": true,
+        "needs_host_compute": true
+      }
+    }
+  ]
 }

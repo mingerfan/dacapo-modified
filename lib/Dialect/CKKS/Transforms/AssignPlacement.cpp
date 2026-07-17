@@ -69,13 +69,24 @@ FailureOr<std::vector<int64_t>> parseDeviceCounts(llvm::StringRef encoded,
   encoded.split(parts, 'x', -1, false);
   for (llvm::StringRef part : parts) {
     int64_t count = 0;
-    if (part.empty() || part.getAsInteger(10, count) || count <= 0 ||
+    if (part.empty() || part.getAsInteger(10, count) || count < 0 ||
         count > std::numeric_limits<int32_t>::max()) {
-      op->emitError("device-counts must contain positive int32 values "
+      op->emitError("device-counts must contain nonnegative int32 values "
                     "separated by x");
       return failure();
     }
     result.push_back(count);
+  }
+  const bool cpuTopology =
+      std::all_of(result.begin(), result.end(),
+                  [](int64_t count) { return count == 0; });
+  const bool deviceTopology =
+      std::all_of(result.begin(), result.end(),
+                  [](int64_t count) { return count > 0; });
+  if (!cpuTopology && !deviceTopology) {
+    op->emitError(
+        "device-counts must be either all zero for CPU ranks or all positive");
+    return failure();
   }
   return result;
 }
@@ -128,14 +139,11 @@ llvm::StringRef operatorName(Operation *op) {
   return {};
 }
 
-FailureOr<int64_t> operationCost(Operation *op, const Json &spec) {
+FailureOr<int64_t> operationCost(Operation *op, const Json &spec,
+                                 llvm::StringRef bootProfile) {
   llvm::StringRef name = operatorName(op);
   if (name.empty()) {
     op->emitError("unsupported operation in CKKS placement");
-    return failure();
-  }
-  if (name == "boot") {
-    op->emitError("CKKS placement does not yet support bootstrap latency");
     return failure();
   }
   if (op->getNumOperands() == 0 || !ckks::getPolyType(op->getOperand(0))) {
@@ -158,6 +166,50 @@ FailureOr<int64_t> operationCost(Operation *op, const Json &spec) {
       !supported->get<bool>()) {
     op->emitError("OperatorSpec does not support operator ") << name;
     return failure();
+  }
+  if (name == "boot") {
+    if (bootProfile.empty()) {
+      op->emitError("CKKS Boot placement requires --boot-profile");
+      return failure();
+    }
+    auto profiles = spec.find("boot_profiles");
+    if (profiles == spec.end() || !profiles->is_array()) {
+      op->emitError("OperatorSpec is missing boot_profiles");
+      return failure();
+    }
+    const Json *selected = nullptr;
+    for (const Json &profile : *profiles) {
+      if (!profile.is_object())
+        continue;
+      auto profileId = profile.find("profile_id");
+      if (profileId != profile.end() && profileId->is_string() &&
+          profileId->get<std::string>() == bootProfile.str()) {
+        if (selected != nullptr) {
+          op->emitError("OperatorSpec contains duplicate Boot profile ")
+              << bootProfile;
+          return failure();
+        }
+        selected = &profile;
+      }
+    }
+    if (selected == nullptr) {
+      op->emitError("OperatorSpec is missing Boot profile ") << bootProfile;
+      return failure();
+    }
+    auto latency = selected->find("latency_us_by_input_level");
+    if (latency == selected->end() || !latency->is_array() ||
+        level >= latency->size() || !(*latency)[level].is_number_integer()) {
+      op->emitError("Boot profile has no integer latency at input level ")
+          << level;
+      return failure();
+    }
+    const int64_t cost = (*latency)[level].get<int64_t>();
+    if (cost <= 0) {
+      op->emitError("Boot profile latency must be positive at input level ")
+          << level;
+      return failure();
+    }
+    return cost;
   }
   auto latency = entry->find("latency_us_by_level");
   if (latency == entry->end() || !latency->is_array() ||
@@ -208,12 +260,20 @@ class PlacementScheduler {
 public:
   PlacementScheduler(func::FuncOp func, const Json &spec,
                      std::vector<int64_t> deviceCounts,
-                     int64_t intraRankCost, int64_t interRankCost)
+                     llvm::StringRef bootProfile, int64_t intraRankCost,
+                     int64_t interRankCost)
       : func(func), spec(spec), deviceCounts(std::move(deviceCounts)),
-        intraRankCost(intraRankCost), interRankCost(interRankCost) {
-    for (size_t rank = 0; rank < this->deviceCounts.size(); ++rank)
+        bootProfile(bootProfile.str()), intraRankCost(intraRankCost),
+        interRankCost(interRankCost) {
+    const bool cpuTopology = this->deviceCounts.front() == 0;
+    for (size_t rank = 0; rank < this->deviceCounts.size(); ++rank) {
+      if (cpuTopology) {
+        candidates.push_back(Place{static_cast<int64_t>(rank), -1});
+        continue;
+      }
       for (int64_t device = 0; device < this->deviceCounts[rank]; ++device)
-        devices.push_back(Place{static_cast<int64_t>(rank), device});
+        candidates.push_back(Place{static_cast<int64_t>(rank), device});
+    }
     averageCommCost = computeAverageCommunicationCost();
   }
 
@@ -245,7 +305,7 @@ private:
         origins[op.getResult(0)] = {Place{0, -1}, 0};
         continue;
       }
-      FailureOr<int64_t> cost = operationCost(&op, spec);
+      FailureOr<int64_t> cost = operationCost(&op, spec, bootProfile);
       if (failed(cost))
         return failure();
       opToNode[&op] = nodes.size();
@@ -283,15 +343,12 @@ private:
   }
 
   int64_t computeAverageCommunicationCost() const {
-    const __int128 deviceCount = static_cast<__int128>(devices.size());
-    __int128 intraRankPairs = 0;
-    for (int64_t count : deviceCounts)
-      intraRankPairs += static_cast<__int128>(count) * (count - 1);
-    const __int128 interRankPairs =
-        deviceCount * (deviceCount - 1) - intraRankPairs;
-    const __int128 total =
-        intraRankPairs * intraRankCost + interRankPairs * interRankCost;
-    return static_cast<int64_t>(total / (deviceCount * deviceCount));
+    __int128 total = 0;
+    for (const Place &source : candidates)
+      for (const Place &destination : candidates)
+        total += communicationCost(source, destination);
+    const __int128 count = static_cast<__int128>(candidates.size());
+    return static_cast<int64_t>(total / (count * count));
   }
 
   FailureOr<int64_t> priorityOf(size_t index,
@@ -356,7 +413,7 @@ private:
     Place bestPlace;
     int64_t bestStart = 0;
     int64_t bestFinish = 0;
-    for (const Place &candidatePlace : devices) {
+    for (const Place &candidatePlace : candidates) {
       int64_t ready = 0;
       for (Value operand : node.op->getOperands()) {
         FailureOr<int64_t> arrival =
@@ -448,7 +505,7 @@ private:
       static_cast<void>(place);
       for (size_t index = 1; index < intervals.size(); ++index)
         if (intervals[index - 1].finish > intervals[index].start)
-          return func.emitError("placement overlaps operations on one device");
+          return func.emitError("placement overlaps operations at one place");
     }
     return success();
   }
@@ -498,10 +555,11 @@ private:
   func::FuncOp func;
   const Json &spec;
   std::vector<int64_t> deviceCounts;
+  std::string bootProfile;
   int64_t intraRankCost;
   int64_t interRankCost;
   int64_t averageCommCost = 0;
-  std::vector<Place> devices;
+  std::vector<Place> candidates;
   std::vector<Node> nodes;
   llvm::DenseMap<Operation *, size_t> opToNode;
   llvm::DenseMap<Value, std::pair<Place, int64_t>> origins;
@@ -527,7 +585,7 @@ struct AssignPlacementPass
       signalPassFailure();
       return;
     }
-    PlacementScheduler scheduler(func, *spec, std::move(*counts),
+    PlacementScheduler scheduler(func, *spec, std::move(*counts), bootProfile,
                                  intraRankCommunicationCost,
                                  interRankCommunicationCost);
     if (failed(scheduler.run()))

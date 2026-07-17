@@ -587,7 +587,7 @@ struct EmitRuntimePlanPass
         return;
       }
       for (int64_t count : placedCounts.asArrayRef()) {
-        if (count <= 0 || count > std::numeric_limits<int32_t>::max()) {
+        if (count < 0 || count > std::numeric_limits<int32_t>::max()) {
           func.emitError("placed device count is outside RuntimePlan V1 range");
           signalPassFailure();
           return;

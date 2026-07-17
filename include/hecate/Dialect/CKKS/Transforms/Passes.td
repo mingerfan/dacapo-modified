@@ -62,7 +62,7 @@ def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
 }
 
 def AssignPlacement : Pass<"assign-ckks-placement", "::mlir::func::FuncOp"> {
-  let summary = "Assign CKKS compute operations to a static rank/device topology";
+  let summary = "Assign CKKS compute operations to a static rank/place topology";
   let description = [{
     Uses deterministic HEFT list scheduling. Operator latency comes from an
     OperatorSpec V2 file and communication uses explicit fixed intra-rank and
@@ -70,9 +70,11 @@ def AssignPlacement : Pass<"assign-ckks-placement", "::mlir::func::FuncOp"> {
   }];
   let options = [
     Option<"deviceCounts", "device-counts", "std::string", /*default=*/[{""}],
-           "Per-rank device counts separated by x, for example 8x8">,
+           "Per-rank device counts; all-zero values select CPU Host ranks">,
     Option<"operatorSpecPath", "operator-spec", "std::string", /*default=*/[{""}],
            "OperatorSpec V2 JSON used for compute latency">,
+    Option<"bootProfile", "boot-profile", "std::string", /*default=*/[{""}],
+           "OperatorSpec V2 Boot profile used for Boot latency">,
     Option<"intraRankCommunicationCost", "intra-rank-communication-cost",
            "int64_t", /*default=*/[{1000}],
            "Fixed point-to-point cost between different places in one rank">,

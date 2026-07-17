@@ -294,6 +294,7 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       hecate::ckks::AssignPlacementOptions placement;
       placement.deviceCounts = runtime_plan_device_counts;
       placement.operatorSpecPath = runtime_plan_operator_spec_path;
+      placement.bootProfile = runtime_plan_boot_profile;
       placement.intraRankCommunicationCost =
           runtime_plan_intra_rank_communication_cost;
       placement.interRankCommunicationCost =
