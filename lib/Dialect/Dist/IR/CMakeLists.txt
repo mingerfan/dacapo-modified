@@ -1,0 +1,9 @@
+add_mlir_dialect_library(DistDialect
+  DistDialect.cpp
+  DEPENDS
+  HecateDistOpsIncGen
+  LINK_LIBS
+  PUBLIC
+  CKKSDialect
+  MLIRIR
+)

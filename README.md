@@ -59,11 +59,16 @@ This fork carries CKKS `components`, `scale_log2`, and `level` in
 `ckks.mulcc` and `ckks.relinearize` operations. CKKS operations use SSA results
 directly and do not carry destination operands or `tensor.empty` placeholders;
 bufferization is intentionally left to a later lowering. The
-`emit-runtime-plan` pass serializes linear single-Host CKKS functions to
-RuntimePlan V1 JSON. Encode payloads larger than 4096 bytes are written to a
-content-addressed plaintext bundle, while smaller payloads remain inline. The
-old HEVM emitter is retired and reports an error when invoked. Run `ctest`
-after the Nix build to exercise the RuntimePlan lowering fixtures.
+`emit-runtime-plan` serializes linear CKKS functions to RuntimePlan V1 JSON.
+Without placement it emits the original single-Host plan. The optional
+`assign-ckks-placement` pass uses deterministic HEFT scheduling with
+OperatorSpec V2 latency tables and explicit fixed communication costs;
+`materialize-ckks-communication` then inserts one-to-one `dist.transfer`
+operations with point-to-point hints. Encode payloads larger than 4096 bytes
+are written to a content-addressed plaintext bundle, while smaller payloads
+remain inline. The old HEVM emitter is retired and reports an error when
+invoked. Run `ctest` after the Nix build to exercise Host, 1-rank/8-device, and
+2-rank/8-device RuntimePlan fixtures.
 
 ### Install MLIR 
 ```bash

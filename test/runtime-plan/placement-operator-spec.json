@@ -1,0 +1,39 @@
+{
+  "spec_format_version": 2,
+  "spec_id": "dacapo-placement-test-v1",
+  "version": 1,
+  "status": "validated",
+  "target_id": "dacapo-placement-test",
+  "rescale_mode": "eager",
+  "noise_unit": null,
+  "provenance": {
+    "kind": "test-fixture",
+    "repository": "ckks-runtime",
+    "revision": "test",
+    "path": "test/runtime-plan/placement-operator-spec.json",
+    "source_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "context": {
+    "context_id": "test-context",
+    "poly_degree": 16,
+    "rns_moduli_log2": [40, 40, 40, 40, 40, 40],
+    "max_modulus_log2": 40,
+    "default_scale_log2": 40
+  },
+  "levels": {"lower_bound": 0, "upper_bound": 5},
+  "operators": {
+    "add_cc": {"supported": true, "latency_us_by_level": [100, 100, 100, 100, 100, 100], "noise_by_level": null},
+    "add_cp": {"supported": true, "latency_us_by_level": [80, 80, 80, 80, 80, 80], "noise_by_level": null},
+    "sub_cc": {"supported": true, "latency_us_by_level": [100, 100, 100, 100, 100, 100], "noise_by_level": null},
+    "sub_cp": {"supported": true, "latency_us_by_level": [80, 80, 80, 80, 80, 80], "noise_by_level": null},
+    "mul_cc": {"supported": true, "latency_us_by_level": [800, 800, 800, 800, 800, 800], "noise_by_level": null},
+    "mul_cp": {"supported": true, "latency_us_by_level": [300, 300, 300, 300, 300, 300], "noise_by_level": null},
+    "negate": {"supported": true, "latency_us_by_level": [50, 50, 50, 50, 50, 50], "noise_by_level": null},
+    "rotate": {"supported": true, "latency_us_by_level": [1000, 1000, 1000, 1000, 1000, 1000], "noise_by_level": null},
+    "rescale": {"supported": true, "max_levels_per_op": 1, "latency_us_by_level": [300, 300, 300, 300, 300, 300], "noise_by_level": null},
+    "mod_switch": {"supported": true, "latency_us_by_level": [200, 200, 200, 200, 200, 200], "noise_by_level": null},
+    "relinearize": {"supported": true, "latency_us_by_level": [400, 400, 400, 400, 400, 400], "noise_by_level": null},
+    "boot": {"supported": false}
+  },
+  "boot_profiles": []
+}

@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 import struct
 import subprocess
 import tempfile
@@ -72,6 +73,117 @@ def load_bundle(plan: dict, directory: Path) -> tuple[dict, dict[str, bytes]]:
         assert content == "sha256:" + hashlib.sha256(data).hexdigest()
         blobs[content] = data
     return manifest, blobs
+
+
+def run_placement_pipeline(hecate_opt: Path, source_dir: Path, temp: Path,
+                           device_counts: str, plan_id: int) -> tuple[dict, str]:
+    spec_path = source_dir / "test/runtime-plan/placement-operator-spec.json"
+    spec_digest = "sha256:" + hashlib.sha256(spec_path.read_bytes()).hexdigest()
+    prefix = temp / f"placement-{device_counts}"
+    placement = (
+        "assign-ckks-placement{"
+        f"device-counts={device_counts} operator-spec={spec_path} "
+        "intra-rank-communication-cost=10 "
+        "inter-rank-communication-cost=20}"
+    )
+    emit = (
+        "emit-runtime-plan{"
+        f"prefix={prefix} plan-id={plan_id} "
+        "target-id=dacapo-placement-test capability-version=1 "
+        "operator-spec-id=dacapo-placement-test-v1 "
+        f"operator-spec-version=1 operator-spec-sha256={spec_digest} "
+        "context-id=test-context device-count=0 ntt=true}"
+    )
+    output = temp / f"placement-{device_counts}.mlir"
+    subprocess.run(
+        [
+            str(hecate_opt),
+            str(source_dir / "test/runtime-plan/placement-fanout.mlir"),
+            f"-p=builtin.module(func.func({placement},"
+            f"materialize-ckks-communication,{emit}))",
+            "-o", str(output),
+        ],
+        cwd=source_dir,
+        check=True,
+    )
+    plan_path = Path(f"{prefix}.placement_fanout.runtime-plan.json")
+    return json.loads(plan_path.read_text(encoding="utf-8")), output.read_text(
+        encoding="utf-8"
+    )
+
+
+def place_key(place: dict) -> tuple[int, int]:
+    return place["rank"], place.get("index", -1)
+
+
+def verify_placement(plan: dict, mlir: str,
+                     expected_device_counts: list[int]) -> None:
+    assert plan["target"]["world_size"] == len(expected_device_counts)
+    assert plan["target"]["device_counts"] == expected_device_counts
+    descriptions = {item["id"]: item for item in plan["values"]}
+    instructions = plan["initialization"] + plan["execution"]
+    transfers = [item for item in instructions if item["kind"] == "transfer"]
+    computes = [item for item in instructions if item["kind"] == "compute"]
+    assert len(computes) == 31
+    assert transfers
+    assert all(item["hint"] == "point_to_point" for item in transfers)
+    assert all(len(item["inputs"]) == len(item["outputs"]) == 1
+               for item in transfers)
+    assert all(int(item["outputs"][0]) > 31 for item in transfers)
+
+    expected_places = {
+        (rank, device)
+        for rank, count in enumerate(expected_device_counts)
+        for device in range(count)
+    }
+    compute_places = {place_key(item["place"]) for item in computes}
+    assert compute_places == expected_places
+    for item in computes:
+        output_place = place_key(descriptions[item["output"]]["place"])
+        assert output_place == place_key(item["place"])
+        assert all(place_key(descriptions[value_id]["place"]) == output_place
+                   for value_id in item["inputs"])
+
+    schedule = {}
+    intervals: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for line in mlir.splitlines():
+        if '"ckks.' not in line or "dist.schedule_start" not in line:
+            continue
+        logical_id = int(re.search(r"dist.logical_id = ([0-9]+)", line).group(1))
+        rank = int(re.search(r"dist.rank = ([0-9]+)", line).group(1))
+        device = int(re.search(r"dist.device = ([0-9]+)", line).group(1))
+        start = int(re.search(r"dist.schedule_start = ([0-9]+)", line).group(1))
+        finish = int(re.search(r"dist.schedule_finish = ([0-9]+)", line).group(1))
+        op = re.search(r'"ckks\.([a-z]+)"', line).group(1)
+        expected_duration = 1000 if op == "rotatec" else 100
+        assert finish - start == expected_duration
+        schedule[str(logical_id)] = (start, finish, (rank, device))
+        intervals.setdefault((rank, device), []).append((start, finish))
+    assert set(schedule) == {str(value_id) for value_id in range(1, 32)}
+    for placed_intervals in intervals.values():
+        placed_intervals.sort()
+        assert all(left[1] <= right[0]
+                   for left, right in zip(placed_intervals,
+                                          placed_intervals[1:]))
+
+    transfer_by_output = {item["outputs"][0]: item for item in transfers}
+
+    def ready_time(value_id: str) -> int:
+        if value_id in schedule:
+            return schedule[value_id][1]
+        transfer = transfer_by_output.get(value_id)
+        if transfer is None:
+            assert value_id == "0"
+            return 0
+        source = place_key(transfer["sources"][0])
+        destination = place_key(transfer["destinations"][0])
+        cost = 10 if source[0] == destination[0] else 20
+        return ready_time(transfer["inputs"][0]) + cost
+
+    for item in computes:
+        start, _, place = schedule[item["output"]]
+        assert place == place_key(item["place"])
+        assert start >= max(ready_time(value_id) for value_id in item["inputs"])
 
 
 def main() -> None:
@@ -220,6 +332,21 @@ def main() -> None:
         assert len(reuse_manifest["blobs"]) == 1
         reuse_values = struct.unpack("<600d", reuse_blobs[payloads[0]["content"]])
         assert set(reuse_values) == {1.25}
+
+        placement_1x8, placement_1x8_mlir = run_placement_pipeline(
+            args.hecate_opt, args.source_dir, temp, "8", 18
+        )
+        verify_placement(placement_1x8, placement_1x8_mlir, [8])
+        placement_1x8_repeat, placement_1x8_repeat_mlir = run_placement_pipeline(
+            args.hecate_opt, args.source_dir, temp, "8", 18
+        )
+        assert placement_1x8_repeat == placement_1x8
+        assert placement_1x8_repeat_mlir == placement_1x8_mlir
+
+        placement_2x8, placement_2x8_mlir = run_placement_pipeline(
+            args.hecate_opt, args.source_dir, temp, "8x8", 28
+        )
+        verify_placement(placement_2x8, placement_2x8_mlir, [8, 8])
 
 
 if __name__ == "__main__":

@@ -23,10 +23,11 @@ def EmitHEVM : Pass<"emit-hevm", "::mlir::func::FuncOp"> {
 }
 
 def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
-  let summary = "Emit a single-Host RuntimePlan V1 JSON file";
+  let summary = "Emit a Host or placed RuntimePlan V1 JSON file";
   let description = [{
-    Serializes a linear CKKS function to RuntimePlan V1. This stage-two pass
-    places all values and computation on Host rank 0 and emits no communication.
+    Serializes a linear CKKS function to RuntimePlan V1. Unplaced functions use
+    Host rank 0. Placed functions preserve rank/device assignments and explicit
+    dist.transfer operations.
   }];
   let options = [
     Option<"prefix", "prefix", "std::string", /*default=*/[{""}],
@@ -58,6 +59,36 @@ def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
            /*default=*/[{4096}],
            "Largest Encode payload kept inline; larger float64 payloads use a bundle">
   ];
+}
+
+def AssignPlacement : Pass<"assign-ckks-placement", "::mlir::func::FuncOp"> {
+  let summary = "Assign CKKS compute operations to a static rank/device topology";
+  let description = [{
+    Uses deterministic HEFT list scheduling. Operator latency comes from an
+    OperatorSpec V2 file and communication uses explicit fixed intra-rank and
+    inter-rank costs.
+  }];
+  let options = [
+    Option<"deviceCounts", "device-counts", "std::string", /*default=*/[{""}],
+           "Per-rank device counts separated by x, for example 8x8">,
+    Option<"operatorSpecPath", "operator-spec", "std::string", /*default=*/[{""}],
+           "OperatorSpec V2 JSON used for compute latency">,
+    Option<"intraRankCommunicationCost", "intra-rank-communication-cost",
+           "int64_t", /*default=*/[{1000}],
+           "Fixed point-to-point cost between different places in one rank">,
+    Option<"interRankCommunicationCost", "inter-rank-communication-cost",
+           "int64_t", /*default=*/[{10000}],
+           "Fixed point-to-point cost between ranks">
+  ];
+}
+
+def MaterializeCommunication : Pass<"materialize-ckks-communication",
+                                    "::mlir::func::FuncOp"> {
+  let summary = "Materialize cross-place CKKS operands as point-to-point transfers";
+  let description = [{
+    Rewrites every cross-place SSA edge through a dist.transfer operation and
+    reuses one physical copy for all consumers at the same destination.
+  }];
 }
 
 #endif

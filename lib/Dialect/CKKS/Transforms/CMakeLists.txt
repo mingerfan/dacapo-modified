@@ -1,5 +1,7 @@
 
 add_mlir_dialect_library(CKKSTransforms
+  AssignPlacement.cpp
+  MaterializeCommunication.cpp
   RemoveLevel.cpp
   EmitHEVM.cpp
   EmitRuntimePlan.cpp
@@ -8,5 +10,6 @@ add_mlir_dialect_library(CKKSTransforms
   LINK_LIBS
   PUBLIC
   CKKSDialect
+  DistDialect
   MLIRIR
   )

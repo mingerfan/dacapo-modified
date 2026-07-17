@@ -1,5 +1,6 @@
 #include "hecate/Dialect/CKKS/IR/CKKSOps.h"
 #include "hecate/Dialect/CKKS/Transforms/Passes.h"
+#include "hecate/Dialect/Dist/IR/DistOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "nlohmann/json.hpp"
@@ -9,6 +10,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/SHA256.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdint>
@@ -27,6 +29,7 @@ namespace ckks {
 
 using namespace mlir;
 namespace ckks = hecate::ckks;
+namespace dist = hecate::dist;
 
 namespace {
 
@@ -51,7 +54,11 @@ bool isSha256(llvm::StringRef value) {
   return true;
 }
 
-Json hostPlace() { return {{"kind", "host"}, {"rank", 0}}; }
+Json placeJson(int64_t rank, int64_t device) {
+  if (device == -1)
+    return {{"kind", "host"}, {"rank", rank}};
+  return {{"kind", "device"}, {"rank", rank}, {"index", device}};
+}
 
 std::string sha256(llvm::StringRef bytes) {
   llvm::SHA256 hasher;
@@ -217,12 +224,16 @@ struct RuntimePlanBuilder {
       return func.emitError(
           "RuntimePlan V1 export currently requires a single-block function");
 
-    for (BlockArgument argument : func.getArguments()) {
-      FailureOr<uint64_t> id = addValue(argument, values);
-      if (failed(id))
+    if (failed(assignIds()))
+      return failure();
+    for (const auto &[id, value] : valuesById) {
+      FailureOr<Json> description = buildValueDesc(value, id);
+      if (failed(description))
         return failure();
-      externalInputs.push_back(std::to_string(*id));
+      values.push_back(std::move(*description));
     }
+    for (BlockArgument argument : func.getArguments())
+      externalInputs.push_back(std::to_string(ids.lookup(argument)));
 
     for (Operation &op : func.getBody().front()) {
       if (isa<func::ReturnOp>(op))
@@ -231,12 +242,10 @@ struct RuntimePlanBuilder {
         return op.emitError(
             "RuntimePlan V1 export does not support nested control flow");
       if (op.getNumResults() != 1 ||
-          op.getName().getDialectNamespace() != "ckks")
+          (op.getName().getDialectNamespace() != "ckks" &&
+           op.getName().getDialectNamespace() != "dist"))
         return op.emitError("unsupported operation in RuntimePlan export");
-
-      FailureOr<uint64_t> outputId = addValue(op.getResult(0), values);
-      if (failed(outputId))
-        return failure();
+      const uint64_t outputId = ids.lookup(op.getResult(0));
 
       if (auto encode = dyn_cast<ckks::EncodeOp>(op)) {
         FailureOr<Json> payload = encodePayload(
@@ -245,11 +254,39 @@ struct RuntimePlanBuilder {
           return failure();
         initialization.push_back({{"kind", "encode"},
                                   {"payload", std::move(*payload)},
-                                  {"output", std::to_string(*outputId)}});
+                                  {"output", std::to_string(outputId)}});
         continue;
       }
 
-      FailureOr<Json> instruction = buildCompute(&op, *outputId);
+      if (auto transfer = dyn_cast<dist::TransferOp>(op)) {
+        FailureOr<std::string> inputId = valueId(transfer.getInput(), &op);
+        if (failed(inputId))
+          return failure();
+        auto type = ckks::getPolyType(transfer.getResult());
+        Json instruction = {
+            {"kind", "transfer"},
+            {"transfer_id", std::to_string(transfer.getTransferId())},
+            {"hint", "point_to_point"},
+            {"inputs", Json::array({*inputId})},
+            {"outputs", Json::array({std::to_string(outputId)})},
+            {"sources",
+             Json::array({placeJson(transfer.getSourceRankAttr().getInt(),
+                                    transfer.getSourceDeviceAttr().getInt())})},
+            {"destinations",
+             Json::array(
+                 {placeJson(transfer.getDestinationRankAttr().getInt(),
+                            transfer.getDestinationDeviceAttr().getInt())})},
+            {"output_kinds",
+             Json::array({type.getComponents() == 1 ? "plaintext"
+                                                    : "ciphertext"})}};
+        if (transfer.getInitialization())
+          initialization.push_back(std::move(instruction));
+        else
+          execution.push_back(std::move(instruction));
+        continue;
+      }
+
+      FailureOr<Json> instruction = buildCompute(&op, outputId);
       if (failed(instruction))
         return failure();
       execution.push_back(std::move(*instruction));
@@ -278,7 +315,77 @@ struct RuntimePlanBuilder {
   }
 
 private:
-  FailureOr<uint64_t> addValue(Value value, Json &values) {
+  LogicalResult registerId(Value value, uint64_t id) {
+    if (ids.count(value) || valuesById.count(id)) {
+      if (Operation *definition = value.getDefiningOp())
+        return definition->emitError("duplicate RuntimePlan logical ValueId");
+      return func.emitError("duplicate RuntimePlan argument ValueId");
+    }
+    ids.insert({value, id});
+    valuesById.emplace(id, value);
+    nextValueId = std::max(nextValueId, id + 1);
+    return success();
+  }
+
+  LogicalResult assignIds() {
+    const bool placed = func->hasAttr("dist.device_counts");
+    uint64_t implicitId = 0;
+    for (BlockArgument argument : func.getArguments())
+      if (failed(registerId(argument, implicitId++)))
+        return failure();
+    for (Operation &op : func.getBody().front()) {
+      if (op.getName().getDialectNamespace() != "ckks")
+        continue;
+      auto logicalId = op.getAttrOfType<IntegerAttr>("dist.logical_id");
+      if (placed && !logicalId)
+        return op.emitError("placed CKKS operation is missing logical ValueId");
+      const uint64_t id = logicalId
+                              ? static_cast<uint64_t>(logicalId.getInt())
+                              : implicitId++;
+      if (failed(registerId(op.getResult(0), id)))
+        return failure();
+    }
+    for (Operation &op : func.getBody().front()) {
+      if (auto transfer = dyn_cast<dist::TransferOp>(op))
+        if (failed(registerId(transfer.getResult(), nextValueId)))
+          return failure();
+    }
+    return success();
+  }
+
+  FailureOr<Json> valuePlace(Value value) {
+    IntegerAttr rank;
+    IntegerAttr device;
+    if (auto argument = value.dyn_cast<BlockArgument>()) {
+      rank = func.getArgAttrOfType<IntegerAttr>(argument.getArgNumber(),
+                                                "dist.rank");
+      device = func.getArgAttrOfType<IntegerAttr>(argument.getArgNumber(),
+                                                  "dist.device");
+    } else {
+      Operation *definition = value.getDefiningOp();
+      rank = definition->getAttrOfType<IntegerAttr>("dist.rank");
+      device = definition->getAttrOfType<IntegerAttr>("dist.device");
+    }
+    if (!rank || !device) {
+      if (!func->hasAttr("dist.device_counts"))
+        return placeJson(0, -1);
+      if (Operation *definition = value.getDefiningOp())
+        definition->emitError("placed value is missing dist.rank/dist.device");
+      else
+        func.emitError("placed argument is missing dist.rank/dist.device");
+      return failure();
+    }
+    if (rank.getInt() < 0 || device.getInt() < -1) {
+      if (Operation *definition = value.getDefiningOp())
+        definition->emitError("invalid physical place");
+      else
+        func.emitError("invalid physical argument place");
+      return failure();
+    }
+    return placeJson(rank.getInt(), device.getInt());
+  }
+
+  FailureOr<Json> buildValueDesc(Value value, uint64_t id) {
     auto type = ckks::getPolyType(value);
     if (!type) {
       if (Operation *definingOp = value.getDefiningOp())
@@ -298,18 +405,18 @@ private:
             "CKKS argument metadata is outside RuntimePlan V1 range");
       return failure();
     }
-    uint64_t id = nextValueId++;
-    ids.insert({value, id});
-    values.push_back(
-        {{"id", std::to_string(id)},
-         {"kind", type.getComponents() == 1 ? "plaintext" : "ciphertext"},
-         {"place", hostPlace()},
-         {"context", contextId},
-         {"level", type.getLevel()},
-         {"scale_log2", type.getScaleLog2()},
-         {"ntt", ntt},
-         {"components", type.getComponents()}});
-    return id;
+    FailureOr<Json> place = valuePlace(value);
+    if (failed(place))
+      return failure();
+    return Json{{"id", std::to_string(id)},
+                {"kind", type.getComponents() == 1 ? "plaintext"
+                                                    : "ciphertext"},
+                {"place", std::move(*place)},
+                {"context", contextId},
+                {"level", type.getLevel()},
+                {"scale_log2", type.getScaleLog2()},
+                {"ntt", ntt},
+                {"components", type.getComponents()}};
   }
 
   FailureOr<std::string> valueId(Value value, Operation *user) const {
@@ -322,7 +429,7 @@ private:
   }
 
   FailureOr<Json> makeCompute(Operation *op, uint64_t outputId,
-                              llvm::StringRef name, ValueRange inputs) const {
+                              llvm::StringRef name, ValueRange inputs) {
     Json inputIds = Json::array();
     for (Value input : inputs) {
       FailureOr<std::string> id = valueId(input, op);
@@ -330,14 +437,17 @@ private:
         return failure();
       inputIds.push_back(*id);
     }
+    FailureOr<Json> place = valuePlace(op->getResult(0));
+    if (failed(place))
+      return failure();
     return Json{{"kind", "compute"},
                 {"op", name.str()},
-                {"place", hostPlace()},
+                {"place", std::move(*place)},
                 {"inputs", std::move(inputIds)},
                 {"output", std::to_string(outputId)}};
   }
 
-  FailureOr<Json> buildCompute(Operation *op, uint64_t outputId) const {
+  FailureOr<Json> buildCompute(Operation *op, uint64_t outputId) {
     FailureOr<Json> instruction = failure();
     if (auto value = dyn_cast<ckks::AddCCOp>(op))
       instruction =
@@ -413,6 +523,7 @@ private:
   PlaintextBundleWriter &bundle;
   uint64_t inlinePayloadMaxBytes;
   llvm::DenseMap<Value, uint64_t> ids;
+  std::map<uint64_t, Value> valuesById;
   uint64_t nextValueId = 0;
 };
 
@@ -465,6 +576,27 @@ struct EmitRuntimePlanPass
     Json initialization = Json::array();
     Json execution = Json::array();
     Json finalOutputs = Json::array();
+    Json emittedDeviceCounts = Json::array();
+    int64_t worldSize = 1;
+    if (auto placedCounts =
+            func->getAttrOfType<DenseI64ArrayAttr>("dist.device_counts")) {
+      worldSize = static_cast<int64_t>(placedCounts.size());
+      if (worldSize <= 0 || worldSize > std::numeric_limits<int32_t>::max()) {
+        func.emitError("placed world size is outside RuntimePlan V1 range");
+        signalPassFailure();
+        return;
+      }
+      for (int64_t count : placedCounts.asArrayRef()) {
+        if (count <= 0 || count > std::numeric_limits<int32_t>::max()) {
+          func.emitError("placed device count is outside RuntimePlan V1 range");
+          signalPassFailure();
+          return;
+        }
+        emittedDeviceCounts.push_back(count);
+      }
+    } else {
+      emittedDeviceCounts.push_back(deviceCount.getValue());
+    }
     const std::string artifactStem =
         prefix.getValue() + "." + func.getName().str();
     PlaintextBundleWriter bundle(
@@ -491,8 +623,8 @@ struct EmitRuntimePlanPass
                     {{"id", operatorSpecId.getValue()},
                      {"version", operatorSpecVersion.getValue()},
                      {"source_sha256", operatorSpecSha256.getValue()}}},
-                   {"world_size", 1},
-                   {"device_counts", Json::array({deviceCount.getValue()})}}},
+                   {"world_size", worldSize},
+                   {"device_counts", std::move(emittedDeviceCounts)}}},
                  {"values", std::move(values)},
                  {"external_inputs", std::move(externalInputs)},
                  {"initialization", std::move(initialization)},

@@ -38,6 +38,7 @@
 #include "hecate/Conversion/Passes.h"
 #include "hecate/Dialect/CKKS/IR/CKKSOps.h"
 #include "hecate/Dialect/CKKS/Transforms/Passes.h"
+#include "hecate/Dialect/Dist/IR/DistOps.h"
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
 
@@ -110,10 +111,12 @@ int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   registry.insert<earth::EarthDialect>();
   registry.insert<ckks::CKKSDialect>();
+  registry.insert<dist::DistDialect>();
   registry.insert<func::FuncDialect>();
   registry.insert<tensor::TensorDialect>();
   context.getOrLoadDialect<earth::EarthDialect>();
   context.getOrLoadDialect<ckks::CKKSDialect>();
+  context.getOrLoadDialect<dist::DistDialect>();
   context.loadDialect<func::FuncDialect>();
   context.loadDialect<tensor::TensorDialect>();
 
@@ -256,6 +259,21 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
   static cl::opt<int64_t> runtime_plan_device_count{
       "runtime-plan-device-count",
       cl::desc("Device count for the single RuntimePlan rank"), cl::init(0)};
+  static cl::opt<std::string> runtime_plan_device_counts{
+      "runtime-plan-device-counts",
+      cl::desc("Per-rank device counts separated by x; enables placement"),
+      cl::init("")};
+  static cl::opt<std::string> runtime_plan_operator_spec_path{
+      "runtime-plan-operator-spec-path",
+      cl::desc("OperatorSpec V2 JSON used by placement"), cl::init("")};
+  static cl::opt<int64_t> runtime_plan_intra_rank_communication_cost{
+      "runtime-plan-intra-rank-communication-cost",
+      cl::desc("Fixed intra-rank point-to-point placement cost"),
+      cl::init(1000)};
+  static cl::opt<int64_t> runtime_plan_inter_rank_communication_cost{
+      "runtime-plan-inter-rank-communication-cost",
+      cl::desc("Fixed inter-rank point-to-point placement cost"),
+      cl::init(10000)};
   static cl::opt<bool> runtime_plan_ntt{
       "runtime-plan-ntt", cl::desc("ValueDesc NTT state"), cl::init(true)};
   static cl::opt<std::string> runtime_plan_boot_profile{
@@ -272,6 +290,19 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
   auto addRuntimePlanExport = [&](OpPassManager &pm,
                                   const std::string &artifactPrefix) {
+    if (!runtime_plan_device_counts.empty()) {
+      hecate::ckks::AssignPlacementOptions placement;
+      placement.deviceCounts = runtime_plan_device_counts;
+      placement.operatorSpecPath = runtime_plan_operator_spec_path;
+      placement.intraRankCommunicationCost =
+          runtime_plan_intra_rank_communication_cost;
+      placement.interRankCommunicationCost =
+          runtime_plan_inter_rank_communication_cost;
+      pm.addNestedPass<func::FuncOp>(
+          hecate::ckks::createAssignPlacement(placement));
+      pm.addNestedPass<func::FuncOp>(
+          hecate::ckks::createMaterializeCommunication());
+    }
     hecate::ckks::EmitRuntimePlanOptions options;
     options.prefix = artifactPrefix;
     options.planId = runtime_plan_id;
