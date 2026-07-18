@@ -140,13 +140,12 @@ void hecate::ckks::CKKSDialect::initialize() {
 ::mlir::LogicalResult hecate::ckks::RescaleCOp::verify() {
   auto result = ckks::getPolyType(getResult());
   auto src = ckks::getPolyType(getSrc());
-  const bool validLevel =
-      result.getLevel() < src.getLevel() &&
-      (result.getLevel() == 0 || result.getLevel() == src.getLevel() - 1);
+  const bool validLevel = result.getLevel() < src.getLevel();
   if (src.getComponents() < 2 ||
-      result.getComponents() != src.getComponents() || !validLevel)
+      result.getComponents() != src.getComponents() || !validLevel ||
+      result.getScaleLog2() >= src.getScaleLog2())
     return emitOpError("requires ciphertext components to remain unchanged and "
-                       "level to decrease");
+                       "level and scale to decrease");
   return ::mlir::success();
 }
 

@@ -61,6 +61,24 @@ def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
   ];
 }
 
+def MaterializePhysicalLevels : Pass<"materialize-ckks-physical-levels",
+                                     "::mlir::func::FuncOp"> {
+  let summary = "Map logical CKKS levels to a target's physical RNS levels";
+  let description = [{
+    Keeps Earth scale analysis in logical levels, then expands each consumed
+    logical level into a fixed number of physical RNS levels before placement.
+    The target OperatorSpec supplies the physical chain bounds and modulus bit
+    widths used to validate Rescale operations.
+  }];
+  let options = [
+    Option<"operatorSpecPath", "operator-spec", "std::string",
+           /*default=*/[{""}], "Target OperatorSpec V1 or V2 JSON">,
+    Option<"levelsPerLogicalLevel", "levels-per-logical-level", "int64_t",
+           /*default=*/[{4}],
+           "Physical RNS levels consumed by one logical level">
+  ];
+}
+
 def AssignPlacement : Pass<"assign-ckks-placement", "::mlir::func::FuncOp"> {
   let summary = "Assign CKKS compute operations to a static rank/place topology";
   let description = [{

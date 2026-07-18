@@ -1,0 +1,95 @@
+{
+  "spec_format_version": 2,
+  "spec_id": "lazy-physical-level-test-v1",
+  "version": 1,
+  "status": "validated",
+  "target_id": "lazy-physical-level-test",
+  "rescale_mode": "lazy",
+  "noise_unit": null,
+  "provenance": {
+    "kind": "test-fixture",
+    "repository": "dacapo-modified",
+    "revision": "test",
+    "path": "test/runtime-plan/lazy-physical-level-operator-spec.json",
+    "source_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "context": {
+    "context_id": "lazy-physical-level-test",
+    "poly_degree": 16,
+    "rns_moduli_log2": [
+      30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30
+    ],
+    "max_modulus_log2": 30,
+    "default_scale_log2": 40
+  },
+  "levels": {
+    "lower_bound": 1,
+    "upper_bound": 13
+  },
+  "operators": {
+    "add_cc": {
+      "supported": false,
+      "latency_us_by_level": null,
+      "noise_by_level": null
+    },
+    "add_cp": {
+      "supported": false,
+      "latency_us_by_level": null,
+      "noise_by_level": null
+    },
+    "sub_cc": {
+      "supported": false,
+      "latency_us_by_level": null,
+      "noise_by_level": null
+    },
+    "sub_cp": {
+      "supported": false,
+      "latency_us_by_level": null,
+      "noise_by_level": null
+    },
+    "mul_cc": {
+      "supported": false,
+      "latency_us_by_level": null,
+      "noise_by_level": null
+    },
+    "mul_cp": {
+      "supported": false,
+      "latency_us_by_level": null,
+      "noise_by_level": null
+    },
+    "negate": {
+      "supported": false,
+      "latency_us_by_level": null,
+      "noise_by_level": null
+    },
+    "rotate": {
+      "supported": false,
+      "latency_us_by_level": null,
+      "noise_by_level": null
+    },
+    "rescale": {
+      "supported": true,
+      "max_levels_per_op": 4,
+      "latency_us_by_level": [
+        0, 0, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113
+      ],
+      "noise_by_level": null
+    },
+    "mod_switch": {
+      "supported": true,
+      "latency_us_by_level": [
+        0, 0, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213
+      ],
+      "noise_by_level": null
+    },
+    "relinearize": {
+      "supported": false,
+      "latency_us_by_level": null,
+      "noise_by_level": null
+    },
+    "boot": {
+      "supported": false
+    }
+  },
+  "boot_profiles": []
+}

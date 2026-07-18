@@ -317,6 +317,81 @@ def main() -> None:
         }
         assert compute["execution"][4]["attrs"] == {"target_level": 3}
 
+        lazy_spec = (
+            args.source_dir /
+            "test/runtime-plan/lazy-physical-level-operator-spec.json"
+        )
+        physical_levels = (
+            "materialize-ckks-physical-levels{"
+            f"operator-spec={lazy_spec} levels-per-logical-level=4}}"
+        )
+        lazy_placement = (
+            "assign-ckks-placement{"
+            f"device-counts=1 operator-spec={lazy_spec} "
+            "intra-rank-communication-cost=1000 "
+            "inter-rank-communication-cost=10000}"
+        )
+        lazy, lazy_mlir_path = run_pipeline(
+            args.hecate_opt, args.source_dir, temp,
+            "lazy-physical-levels", "lazy_physical_levels", 8,
+            [physical_levels, lazy_placement,
+             "materialize-ckks-communication"],
+        )
+        assert [value(lazy, str(index))["level"] for index in range(3)] == [
+            13, 9, 5
+        ]
+        lazy_computes = [
+            instruction for instruction in lazy["execution"]
+            if instruction["kind"] == "compute"
+        ]
+        assert [instruction["op"] for instruction in lazy_computes] == [
+            "rescale", "mod_switch"
+        ]
+        assert lazy_computes[0]["attrs"] == {
+            "target_level": 9,
+            "target_scale_log2": 40,
+        }
+        assert lazy_computes[1]["attrs"] == {"target_level": 5}
+
+        lazy_mlir = lazy_mlir_path.read_text(encoding="utf-8")
+        assert "ckks.logical_init_level = 5 : i64" in lazy_mlir
+        assert "ckks.levels_per_logical_level = 4 : i64" in lazy_mlir
+        assert "init_level = 13 : i64" in lazy_mlir
+        assert "downFactor = 4 : i64" in lazy_mlir
+        for op_name, expected_duration in (("rescalec", 113),
+                                           ("modswitchc", 209)):
+            line = next(
+                line for line in lazy_mlir.splitlines()
+                if f'"ckks.{op_name}"' in line
+            )
+            start = int(re.search(
+                r"dist.schedule_start = ([0-9]+)", line
+            ).group(1))
+            finish = int(re.search(
+                r"dist.schedule_finish = ([0-9]+)", line
+            ).group(1))
+            assert finish - start == expected_duration
+
+        for fixture, expected_error in (
+            ("lazy-physical-levels-invalid-scale",
+             "scale drop does not match the target physical modulus bits"),
+            ("lazy-physical-levels-underflow",
+             "requires a physical level below the OperatorSpec lower_bound"),
+        ):
+            failed_materialization = subprocess.run(
+                [
+                    str(args.hecate_opt),
+                    str(args.source_dir / f"test/runtime-plan/{fixture}.mlir"),
+                    f"-p=builtin.module(func.func({physical_levels}))",
+                    "-o", str(temp / f"{fixture}.mlir"),
+                ],
+                cwd=args.source_dir,
+                text=True,
+                capture_output=True,
+            )
+            assert failed_materialization.returncode != 0
+            assert expected_error in failed_materialization.stderr
+
         zero_rotate, _ = run_pipeline(
             args.hecate_opt, args.source_dir, temp,
             "zero-rotate", "zero_rotate", 6,

@@ -266,6 +266,14 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
   static cl::opt<std::string> runtime_plan_operator_spec_path{
       "runtime-plan-operator-spec-path",
       cl::desc("OperatorSpec V2 JSON used by placement"), cl::init("")};
+  static cl::opt<std::string> runtime_plan_physical_level_operator_spec_path{
+      "runtime-plan-physical-level-operator-spec-path",
+      cl::desc("Lazy-rescale target OperatorSpec used to materialize physical levels"),
+      cl::init("")};
+  static cl::opt<int64_t> runtime_plan_levels_per_logical_level{
+      "runtime-plan-levels-per-logical-level",
+      cl::desc("Physical RNS levels consumed by one logical CKKS level"),
+      cl::init(1)};
   static cl::opt<int64_t> runtime_plan_intra_rank_communication_cost{
       "runtime-plan-intra-rank-communication-cost",
       cl::desc("Fixed intra-rank point-to-point placement cost"),
@@ -290,6 +298,16 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
   auto addRuntimePlanExport = [&](OpPassManager &pm,
                                   const std::string &artifactPrefix) {
+    if (!runtime_plan_physical_level_operator_spec_path.empty() ||
+        runtime_plan_levels_per_logical_level != 1) {
+      hecate::ckks::MaterializePhysicalLevelsOptions physicalLevels;
+      physicalLevels.operatorSpecPath =
+          runtime_plan_physical_level_operator_spec_path;
+      physicalLevels.levelsPerLogicalLevel =
+          runtime_plan_levels_per_logical_level;
+      pm.addNestedPass<func::FuncOp>(
+          hecate::ckks::createMaterializePhysicalLevels(physicalLevels));
+    }
     if (!runtime_plan_device_counts.empty()) {
       hecate::ckks::AssignPlacementOptions placement;
       placement.deviceCounts = runtime_plan_device_counts;
