@@ -437,16 +437,36 @@ def main() -> None:
         )
         verify_placement(placement_2cpu, placement_2cpu_mlir, [0, 0])
 
-        placement_boot, _ = run_placement_pipeline(
-            args.hecate_opt, args.source_dir, temp, "0x0", 48,
+        placement_boot, placement_boot_mlir = run_placement_pipeline(
+            args.hecate_opt, args.source_dir, temp, "1", 48,
             fixture="placement-boot", function="placement_boot",
             boot_profile="test-boot",
         )
-        assert placement_boot["target"]["device_counts"] == [0, 0]
-        assert placement_boot["execution"][0]["op"] == "boot"
-        assert placement_boot["execution"][0]["place"] == {
-            "kind": "host", "rank": 0
-        }
+        assert placement_boot["target"]["device_counts"] == [1]
+        boot_computes = [instruction for instruction in placement_boot["execution"]
+                         if instruction["kind"] == "compute"]
+        assert [instruction["op"] for instruction in boot_computes] == [
+            "negate", "boot", "negate"
+        ]
+        assert [place_key(instruction["place"])
+                for instruction in boot_computes] == [(0, 0), (0, -1), (0, 0)]
+        boot_transfers = [
+            instruction
+            for phase in (placement_boot["initialization"],
+                          placement_boot["execution"])
+            for instruction in phase
+            if instruction["kind"] == "transfer"
+        ]
+        assert len(boot_transfers) == 3
+        assert [(place_key(instruction["sources"][0]),
+                 place_key(instruction["destinations"][0]))
+                for instruction in boot_transfers] == [
+                    ((0, -1), (0, 0)),
+                    ((0, 0), (0, -1)),
+                    ((0, -1), (0, 0)),
+                ]
+        assert re.search(r'"ckks\.bootstrapc".*dist\.device = -1',
+                         placement_boot_mlir)
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@ struct Node {
   SmallVector<size_t> successors;
   size_t remainingPredecessors = 0;
   bool scheduled = false;
+  bool requiresHost = false;
 };
 
 FailureOr<std::vector<int64_t>> parseDeviceCounts(llvm::StringRef encoded,
@@ -140,7 +141,9 @@ llvm::StringRef operatorName(Operation *op) {
 }
 
 FailureOr<int64_t> operationCost(Operation *op, const Json &spec,
-                                 llvm::StringRef bootProfile) {
+                                 llvm::StringRef bootProfile,
+                                 bool &requiresHost) {
+  requiresHost = false;
   llvm::StringRef name = operatorName(op);
   if (name.empty()) {
     op->emitError("unsupported operation in CKKS placement");
@@ -196,6 +199,19 @@ FailureOr<int64_t> operationCost(Operation *op, const Json &spec,
       op->emitError("OperatorSpec is missing Boot profile ") << bootProfile;
       return failure();
     }
+    auto implementation = selected->find("implementation");
+    if (implementation == selected->end() || !implementation->is_string()) {
+      op->emitError("Boot profile is missing implementation");
+      return failure();
+    }
+    const std::string implementationName = implementation->get<std::string>();
+    if (implementationName != "native" &&
+        implementationName != "decrypt_reencrypt") {
+      op->emitError("Boot profile implementation must be native or "
+                    "decrypt_reencrypt");
+      return failure();
+    }
+    requiresHost = implementationName == "decrypt_reencrypt";
     auto latency = selected->find("latency_us_by_input_level");
     if (latency == selected->end() || !latency->is_array() ||
         level >= latency->size() || !(*latency)[level].is_number_integer()) {
@@ -267,6 +283,7 @@ public:
         interRankCost(interRankCost) {
     const bool cpuTopology = this->deviceCounts.front() == 0;
     for (size_t rank = 0; rank < this->deviceCounts.size(); ++rank) {
+      hostCandidates.push_back(Place{static_cast<int64_t>(rank), -1});
       if (cpuTopology) {
         candidates.push_back(Place{static_cast<int64_t>(rank), -1});
         continue;
@@ -305,7 +322,9 @@ private:
         origins[op.getResult(0)] = {Place{0, -1}, 0};
         continue;
       }
-      FailureOr<int64_t> cost = operationCost(&op, spec, bootProfile);
+      bool requiresHost = false;
+      FailureOr<int64_t> cost =
+          operationCost(&op, spec, bootProfile, requiresHost);
       if (failed(cost))
         return failure();
       opToNode[&op] = nodes.size();
@@ -313,6 +332,7 @@ private:
       node.op = &op;
       node.originalIndex = originalIndex++;
       node.cost = *cost;
+      node.requiresHost = requiresHost;
       nodes.push_back(std::move(node));
     }
     for (BlockArgument argument : func.getArguments())
@@ -413,7 +433,9 @@ private:
     Place bestPlace;
     int64_t bestStart = 0;
     int64_t bestFinish = 0;
-    for (const Place &candidatePlace : candidates) {
+    const std::vector<Place> &nodeCandidates =
+        node.requiresHost ? hostCandidates : candidates;
+    for (const Place &candidatePlace : nodeCandidates) {
       int64_t ready = 0;
       for (Value operand : node.op->getOperands()) {
         FailureOr<int64_t> arrival =
@@ -560,6 +582,7 @@ private:
   int64_t interRankCost;
   int64_t averageCommCost = 0;
   std::vector<Place> candidates;
+  std::vector<Place> hostCandidates;
   std::vector<Node> nodes;
   llvm::DenseMap<Operation *, size_t> opToNode;
   llvm::DenseMap<Value, std::pair<Place, int64_t>> origins;
