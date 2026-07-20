@@ -9,14 +9,12 @@ dot
 *.bc
 *.mlir
 !test/runtime-plan/*.mlir
-*.hevm
 *.o
 *.so
 *.dot
 *.csv
 !CMakeLists.txt
 *__pycache__
-*.cst
 *.nsys-rep
 *.sqlite
 !.gitignore

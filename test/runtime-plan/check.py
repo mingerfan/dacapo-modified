@@ -204,7 +204,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="dacapo-runtime-plan-") as directory:
         temp = Path(directory)
 
-        mul, mul_mlir = run_pipeline(
+        mul, _ = run_pipeline(
             args.hecate_opt, args.source_dir, temp,
             "mul-relinearize", "mul_relinearize", 1,
             ["convert-earth-to-ckks"],
@@ -216,19 +216,6 @@ def main() -> None:
                 value(mul, "2")["scale_log2"]) == (3, 40)
         assert (value(mul, "3")["components"],
                 value(mul, "3")["scale_log2"]) == (2, 40)
-
-        retired = subprocess.run(
-            [
-                str(args.hecate_opt), str(mul_mlir),
-                f"-p=builtin.module(func.func(emit-hevm{{prefix={temp / 'hevm'}}}))",
-                "-o", str(temp / "hevm.mlir"),
-            ],
-            cwd=args.source_dir,
-            text=True,
-            capture_output=True,
-        )
-        assert retired.returncode != 0
-        assert "HEVM emission has been retired" in retired.stderr
 
         invalid_rotate = subprocess.run(
             [

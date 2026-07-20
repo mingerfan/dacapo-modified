@@ -58,18 +58,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # set(CMAKE_BUILD_TYPE Debug)
 
-# PACKAGE SETTING
-
-option(HECATE_ENABLE_SEAL_RUNTIME "Build the SEAL HEVM runtime" OFF)
-option(HECATE_ENABLE_HEAAN_RUNTIME "Build the HEaaN HEVM runtime" OFF)
-
 find_package(MLIR REQUIRED CONFIG)
-if (HECATE_ENABLE_SEAL_RUNTIME)
-  find_package(SEAL 4.0 REQUIRED CONFIG)
-endif()
-if (HECATE_ENABLE_HEAAN_RUNTIME)
-  find_package(HEaaN REQUIRED CONFIG)
-endif()
 find_package(OpenMP)
 
 # Packaged MLIR installations may expose the TableGen tools by name instead of

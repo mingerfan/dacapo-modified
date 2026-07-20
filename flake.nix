@@ -32,8 +32,6 @@
             ];
 
             cmakeFlags = [
-              "-DHECATE_ENABLE_SEAL_RUNTIME=OFF"
-              "-DHECATE_ENABLE_HEAAN_RUNTIME=OFF"
               "-DMLIR_DIR=${llvm.mlir.dev}/lib/cmake/mlir"
               "-DLLVM_DIR=${llvm.llvm.dev}/lib/cmake/llvm"
               "-DMLIR_TABLEGEN_EXE=${llvm.tblgen}/bin/mlir-tblgen"

@@ -15,8 +15,6 @@
     "LLVM_DIR": "$env{LLVM_DIR}",
     "MLIR_TABLEGEN_EXE": "$env{MLIR_TABLEGEN_EXE}",
     "LLVM_TABLEGEN_EXE": "$env{LLVM_TABLEGEN_EXE}",
-    "HECATE_ENABLE_SEAL_RUNTIME": "OFF",
-    "HECATE_ENABLE_HEAAN_RUNTIME": "OFF",
     "BUILD_TESTING": "ON"
    }
   },
@@ -30,9 +28,7 @@
     "CMAKE_BUILD_TYPE": "Release",
     "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install/${presetName}",
     "CMAKE_TOOLCHAIN_FILE": "",
-    "MLIR_ROOT": "$env{HOME}/llvm-project",
-    "SEAL_ROOT": "$env{HOME}/SEAL",
-    "HEaaN_ROOT": "$env{HOME}/HEaaN"
+    "MLIR_ROOT": "$env{HOME}/llvm-project"
    }
   },
   {
@@ -44,9 +40,7 @@
    "cacheVariables": {
     "CMAKE_BUILD_TYPE": "Debug",
     "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install/${presetName}",
-    "MLIR_ROOT": "$env{HOME}/llvm-project",
-    "SEAL_ROOT": "$env{HOME}/SEAL",
-    "HEaaN_ROOT": "$env{HOME}/HEaaN"
+    "MLIR_ROOT": "$env{HOME}/llvm-project"
    }
   }
  ],

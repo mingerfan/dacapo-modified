@@ -5,23 +5,6 @@
 
 include "mlir/Pass/PassBase.td"
 
-def RemoveLevel : Pass<"remove-level", "::mlir::func::FuncOp"> {
-  let summary = "Deprecated: remove CKKS levels for the retired HEVM path";
-  let description = [{
-  }];
-}
-
-def EmitHEVM : Pass<"emit-hevm", "::mlir::func::FuncOp"> {
-  let summary = "Retired: HEVM emission is no longer supported";
-  let description = [{
-  }];
-  let options = [
-    Option<"prefix", "prefix", "std::string", /*default=*/[{""}],
-    "Name prefix of output file">,
-  ];
-
-}
-
 def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
   let summary = "Emit a Host or placed RuntimePlan V1 JSON file";
   let description = [{
