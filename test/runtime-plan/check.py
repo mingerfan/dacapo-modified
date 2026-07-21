@@ -146,6 +146,26 @@ def verify_placement(plan: dict, mlir: str,
                for item in transfers)
     assert all(int(item["outputs"][0]) > 31 for item in transfers)
 
+    for phase in (plan["initialization"], plan["execution"]):
+        producer_indices = {
+            item["output"]: index
+            for index, item in enumerate(phase)
+            if item["kind"] in ("encode", "compute")
+        }
+        for index, item in enumerate(phase):
+            if item["kind"] != "transfer":
+                continue
+            input_id = item["inputs"][0]
+            producer_index = producer_indices.get(input_id)
+            if producer_index is None:
+                continue
+            assert producer_index < index
+            assert all(
+                intervening["kind"] == "transfer"
+                and intervening["inputs"] == [input_id]
+                for intervening in phase[producer_index + 1:index]
+            )
+
     expected_places = set()
     for rank, count in enumerate(expected_device_counts):
         if count == 0:

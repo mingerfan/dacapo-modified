@@ -3,6 +3,7 @@
 #include "hecate/Dialect/Dist/IR/DistOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <cstdint>
 #include <map>
@@ -31,6 +32,13 @@ struct Place {
   bool operator<(const Place &other) const {
     return std::tie(rank, device) < std::tie(other.rank, other.device);
   }
+};
+
+struct TransferDemand {
+  Value input;
+  Place source;
+  Place destination;
+  SmallVector<OpOperand *> uses;
 };
 
 FailureOr<Place> placeOf(Value value, func::FuncOp func,
@@ -111,9 +119,9 @@ struct MaterializeCommunicationPass
       }
     }
 
-    llvm::DenseMap<Value, std::map<Place, Value>> copies;
-    int64_t nextTransferId = 0;
     Block &block = func.getBody().front();
+    SmallVector<TransferDemand> demands;
+    llvm::DenseMap<Value, std::map<Place, size_t>> demandIndices;
     for (Operation &op : llvm::make_early_inc_range(block)) {
       if (op.getName().getDialectNamespace() != "ckks" ||
           isa<ckks::EncodeOp>(op))
@@ -135,19 +143,50 @@ struct MaterializeCommunicationPass
         }
         if (*source == destination)
           continue;
-        auto &copiesAtPlaces = copies[input];
-        auto existing = copiesAtPlaces.find(destination);
-        if (existing != copiesAtPlaces.end()) {
-          operand.set(existing->second);
-          continue;
+        auto &indicesAtPlaces = demandIndices[input];
+        auto [found, inserted] =
+            indicesAtPlaces.try_emplace(destination, demands.size());
+        if (inserted) {
+          demands.push_back(TransferDemand{input, *source, destination, {}});
         }
-        OpBuilder builder(&op);
-        dist::TransferOp transfer = createTransfer(
-            builder, op.getLoc(), input, nextTransferId++, *source,
-            destination, isInitializationValue(input));
-        copiesAtPlaces.emplace(destination, transfer.getResult());
-        operand.set(transfer.getResult());
+        demands[found->second].uses.push_back(&operand);
       }
+    }
+
+    llvm::DenseMap<Value, SmallVector<size_t>> demandsByInput;
+    for (size_t index = 0; index < demands.size(); ++index)
+      demandsByInput[demands[index].input].push_back(index);
+
+    int64_t nextTransferId = 0;
+    const auto materialize = [&](Value input, OpBuilder &builder) {
+      auto found = demandsByInput.find(input);
+      if (found == demandsByInput.end())
+        return;
+      for (size_t demandIndex : found->second) {
+        TransferDemand &demand = demands[demandIndex];
+        Location location = input.getLoc();
+        dist::TransferOp transfer = createTransfer(
+            builder, location, input, nextTransferId++, demand.source,
+            demand.destination, isInitializationValue(input));
+        for (OpOperand *use : demand.uses)
+          use->set(transfer.getResult());
+        builder.setInsertionPointAfter(transfer);
+      }
+    };
+
+    OpBuilder argumentBuilder(&block, block.begin());
+    for (BlockArgument argument : func.getArguments())
+      materialize(argument, argumentBuilder);
+
+    SmallVector<Operation *> producers;
+    for (Operation &op : block)
+      if (op.getName().getDialectNamespace() == "ckks")
+        producers.push_back(&op);
+    for (Operation *producer : producers) {
+      OpBuilder builder(producer);
+      builder.setInsertionPointAfter(producer);
+      for (Value result : producer->getResults())
+        materialize(result, builder);
     }
 
     for (Operation &op : block) {
