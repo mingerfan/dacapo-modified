@@ -52,8 +52,8 @@ def HE_DS (close, mpp) :
 def HE_Pool (close, mpp) :
     return close["AP"](mpp)
 
-def HE_Linear(close, mpp, linear, p = 1.0, scale = 1.0) :
-    mpcb = MPCB.Linear(mpp, linear.weight * p , linear.bias.cpu() / scale, 2**16)
+def HE_Linear(close, mpp, linear, p = 1.0, scale = 1.0, nt = 2**16) :
+    mpcb = MPCB.Linear(mpp, linear.weight * p , linear.bias.cpu() / scale, nt)
     return mpcb
 
 def HE_ReshapeLinear(close, mpp, linear, p = 1.0, scale = 1.0, reshape = {}) :
@@ -83,6 +83,5 @@ def HE_ReLU (x) :
 def HE_SiLU (x) :
     calculation = Poly.GenPoly()
     return x * (calculation(x)+0.5)
-
 
 
