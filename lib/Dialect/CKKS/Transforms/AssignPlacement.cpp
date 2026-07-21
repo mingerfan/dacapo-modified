@@ -6,10 +6,12 @@
 #include "llvm/ADT/SmallVector.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -59,8 +61,29 @@ struct Node {
   bool requiresHost = false;
 };
 
+struct RatePoint {
+  int64_t payloadBytes = 0;
+  double rateBytesPerMicrosecond = 0;
+};
+
+struct LinkModel {
+  int64_t startupLatencyMicroseconds = 0;
+  double maxRateBytesPerMicrosecond = 0;
+  int64_t saturationBytes = 0;
+  std::vector<RatePoint> ratePoints;
+};
+
+struct CommunicationProfile {
+  int64_t coefficientBytes = 0;
+  int64_t polyDegree = 0;
+  int64_t modulusCount = 0;
+  LinkModel hostDevice;
+  LinkModel intraRank;
+  LinkModel interRank;
+};
+
 FailureOr<std::vector<int64_t>> parseDeviceCounts(llvm::StringRef encoded,
-                                                   Operation *op) {
+                                                  Operation *op) {
   if (encoded.empty()) {
     op->emitError("assign-ckks-placement requires --device-counts");
     return failure();
@@ -78,12 +101,10 @@ FailureOr<std::vector<int64_t>> parseDeviceCounts(llvm::StringRef encoded,
     }
     result.push_back(count);
   }
-  const bool cpuTopology =
-      std::all_of(result.begin(), result.end(),
-                  [](int64_t count) { return count == 0; });
-  const bool deviceTopology =
-      std::all_of(result.begin(), result.end(),
-                  [](int64_t count) { return count > 0; });
+  const bool cpuTopology = std::all_of(
+      result.begin(), result.end(), [](int64_t count) { return count == 0; });
+  const bool deviceTopology = std::all_of(
+      result.begin(), result.end(), [](int64_t count) { return count > 0; });
   if (!cpuTopology && !deviceTopology) {
     op->emitError(
         "device-counts must be either all zero for CPU ranks or all positive");
@@ -114,6 +135,159 @@ FailureOr<Json> readOperatorSpec(llvm::StringRef path, Operation *op) {
     return failure();
   }
   return spec;
+}
+
+FailureOr<LinkModel> readLinkModel(const Json &links, llvm::StringRef name,
+                                   Operation *op) {
+  auto entry = links.find(name.str());
+  if (entry == links.end() || !entry->is_object()) {
+    op->emitError("communication profile is missing link model ") << name;
+    return failure();
+  }
+  auto startup = entry->find("startup_latency_us");
+  auto maxRate = entry->find("max_rate_bytes_per_us");
+  auto saturation = entry->find("saturation_bytes");
+  if (startup == entry->end() || !startup->is_number_integer() ||
+      startup->get<int64_t>() < 0) {
+    op->emitError("communication profile ")
+        << name << ".startup_latency_us must be a nonnegative integer";
+    return failure();
+  }
+  if (maxRate == entry->end() || !maxRate->is_number()) {
+    op->emitError("communication profile ")
+        << name << ".max_rate_bytes_per_us must be a positive number";
+    return failure();
+  }
+  const double maxRateValue = maxRate->get<double>();
+  if (!std::isfinite(maxRateValue) || maxRateValue <= 0) {
+    op->emitError("communication profile ")
+        << name << ".max_rate_bytes_per_us must be a positive finite number";
+    return failure();
+  }
+  if (saturation == entry->end() || !saturation->is_number_integer() ||
+      saturation->get<int64_t>() <= 0) {
+    op->emitError("communication profile ")
+        << name << ".saturation_bytes must be a positive integer";
+    return failure();
+  }
+
+  LinkModel model;
+  model.startupLatencyMicroseconds = startup->get<int64_t>();
+  model.maxRateBytesPerMicrosecond = maxRateValue;
+  model.saturationBytes = saturation->get<int64_t>();
+  auto points = entry->find("rate_points");
+  if (points == entry->end())
+    return model;
+  if (!points->is_array() || points->empty()) {
+    op->emitError("communication profile ")
+        << name << ".rate_points must be a nonempty array when present";
+    return failure();
+  }
+  for (size_t index = 0; index < points->size(); ++index) {
+    const Json &point = (*points)[index];
+    if (!point.is_object()) {
+      op->emitError("communication profile ")
+          << name << ".rate_points entries must be objects";
+      return failure();
+    }
+    auto payload = point.find("payload_bytes");
+    auto rate = point.find("rate_bytes_per_us");
+    if (payload == point.end() || !payload->is_number_integer() ||
+        payload->get<int64_t>() <= 0 || rate == point.end() ||
+        !rate->is_number()) {
+      op->emitError("communication profile ")
+          << name
+          << ".rate_points require positive payload_bytes and "
+             "rate_bytes_per_us";
+      return failure();
+    }
+    const int64_t payloadValue = payload->get<int64_t>();
+    const double rateValue = rate->get<double>();
+    if (!std::isfinite(rateValue) || rateValue <= 0 ||
+        rateValue > model.maxRateBytesPerMicrosecond) {
+      op->emitError("communication profile ")
+          << name
+          << ".rate_points rates must be positive, finite and no greater than "
+             "max_rate_bytes_per_us";
+      return failure();
+    }
+    if (!model.ratePoints.empty() &&
+        (payloadValue <= model.ratePoints.back().payloadBytes ||
+         rateValue < model.ratePoints.back().rateBytesPerMicrosecond)) {
+      op->emitError("communication profile ")
+          << name
+          << ".rate_points must have increasing payloads and nondecreasing "
+             "rates";
+      return failure();
+    }
+    model.ratePoints.push_back({payloadValue, rateValue});
+  }
+  return model;
+}
+
+FailureOr<CommunicationProfile>
+readCommunicationProfile(llvm::StringRef path, const Json &operatorSpec,
+                         Operation *op) {
+  std::ifstream input(path.str(), std::ios::binary);
+  if (!input) {
+    op->emitError("cannot open communication profile: ") << path;
+    return failure();
+  }
+  Json profile = Json::parse(input, nullptr, false);
+  if (profile.is_discarded() || !profile.is_object()) {
+    op->emitError("communication profile is not valid JSON");
+    return failure();
+  }
+  auto version = profile.find("format_version");
+  auto coefficientBytes = profile.find("coefficient_bytes");
+  auto links = profile.find("links");
+  if (version == profile.end() || !version->is_number_integer() ||
+      version->get<int64_t>() != 1) {
+    op->emitError("communication profile format_version must be 1");
+    return failure();
+  }
+  if (coefficientBytes == profile.end() ||
+      !coefficientBytes->is_number_integer() ||
+      coefficientBytes->get<int64_t>() <= 0) {
+    op->emitError("communication profile coefficient_bytes must be positive");
+    return failure();
+  }
+  if (links == profile.end() || !links->is_object()) {
+    op->emitError("communication profile links must be an object");
+    return failure();
+  }
+
+  auto context = operatorSpec.find("context");
+  if (context == operatorSpec.end() || !context->is_object()) {
+    op->emitError("OperatorSpec context must be an object");
+    return failure();
+  }
+  auto polyDegree = context->find("poly_degree");
+  auto moduli = context->find("rns_moduli_log2");
+  if (polyDegree == context->end() || !polyDegree->is_number_integer() ||
+      polyDegree->get<int64_t>() <= 0 || moduli == context->end() ||
+      !moduli->is_array() || moduli->empty() ||
+      moduli->size() >
+          static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+    op->emitError(
+        "OperatorSpec context has invalid poly_degree or rns_moduli_log2");
+    return failure();
+  }
+
+  FailureOr<LinkModel> hostDevice = readLinkModel(*links, "host_device", op);
+  FailureOr<LinkModel> intraRank = readLinkModel(*links, "intra_rank", op);
+  FailureOr<LinkModel> interRank = readLinkModel(*links, "inter_rank", op);
+  if (failed(hostDevice) || failed(intraRank) || failed(interRank))
+    return failure();
+
+  CommunicationProfile result;
+  result.coefficientBytes = coefficientBytes->get<int64_t>();
+  result.polyDegree = polyDegree->get<int64_t>();
+  result.modulusCount = static_cast<int64_t>(moduli->size());
+  result.hostDevice = std::move(*hostDevice);
+  result.intraRank = std::move(*intraRank);
+  result.interRank = std::move(*interRank);
+  return result;
 }
 
 llvm::StringRef operatorName(Operation *op) {
@@ -264,11 +438,11 @@ int64_t earliestSlot(const std::vector<Interval> &intervals, int64_t ready,
 }
 
 void insertInterval(std::vector<Interval> &intervals, Interval added) {
-  auto position = std::lower_bound(
-      intervals.begin(), intervals.end(), added.start,
-      [](const Interval &interval, int64_t start) {
-        return interval.start < start;
-      });
+  auto position =
+      std::lower_bound(intervals.begin(), intervals.end(), added.start,
+                       [](const Interval &interval, int64_t start) {
+                         return interval.start < start;
+                       });
   intervals.insert(position, added);
 }
 
@@ -277,10 +451,12 @@ public:
   PlacementScheduler(func::FuncOp func, const Json &spec,
                      std::vector<int64_t> deviceCounts,
                      llvm::StringRef bootProfile, int64_t intraRankCost,
-                     int64_t interRankCost)
+                     int64_t interRankCost,
+                     std::optional<CommunicationProfile> communicationProfile)
       : func(func), spec(spec), deviceCounts(std::move(deviceCounts)),
         bootProfile(bootProfile.str()), intraRankCost(intraRankCost),
-        interRankCost(interRankCost) {
+        interRankCost(interRankCost),
+        communicationProfile(std::move(communicationProfile)) {
     const bool cpuTopology = this->deviceCounts.front() == 0;
     for (size_t rank = 0; rank < this->deviceCounts.size(); ++rank) {
       hostCandidates.push_back(Place{static_cast<int64_t>(rank), -1});
@@ -291,7 +467,6 @@ public:
       for (int64_t device = 0; device < this->deviceCounts[rank]; ++device)
         candidates.push_back(Place{static_cast<int64_t>(rank), device});
     }
-    averageCommCost = computeAverageCommunicationCost();
   }
 
   LogicalResult run() {
@@ -355,20 +530,131 @@ private:
     return success();
   }
 
-  int64_t communicationCost(const Place &source,
-                            const Place &destination) const {
-    if (source == destination)
-      return 0;
-    return source.rank == destination.rank ? intraRankCost : interRankCost;
+  FailureOr<int64_t> estimatePayloadBytes(Value value,
+                                          Operation *consumer) const {
+    auto poly = ckks::getPolyType(value);
+    if (!poly) {
+      consumer->emitError(
+          "communication cost requires a CKKS polynomial value");
+      return failure();
+    }
+    if (!communicationProfile) {
+      consumer->emitError(
+          "payload size estimation requires a communication profile");
+      return failure();
+    }
+    const int64_t limbs = static_cast<int64_t>(poly.getLevel()) + 1;
+    if (limbs <= 0 || limbs > communicationProfile->modulusCount) {
+      consumer->emitError(
+          "CKKS level is outside the OperatorSpec modulus chain");
+      return failure();
+    }
+    int64_t elements = 1;
+    if (auto shaped = value.getType().dyn_cast<ShapedType>()) {
+      if (!shaped.hasStaticShape()) {
+        consumer->emitError(
+            "communication cost requires statically shaped CKKS values");
+        return failure();
+      }
+      elements = shaped.getNumElements();
+    }
+    const __int128 bytes = static_cast<__int128>(poly.getComponents()) * limbs *
+                           elements * communicationProfile->polyDegree *
+                           communicationProfile->coefficientBytes;
+    if (bytes <= 0 || bytes > std::numeric_limits<int64_t>::max()) {
+      consumer->emitError(
+          "estimated communication payload size is out of range");
+      return failure();
+    }
+    return static_cast<int64_t>(bytes);
   }
 
-  int64_t computeAverageCommunicationCost() const {
+  const LinkModel &linkModel(const Place &source,
+                             const Place &destination) const {
+    if (source.rank != destination.rank)
+      return communicationProfile->interRank;
+    if (source.device < 0 || destination.device < 0)
+      return communicationProfile->hostDevice;
+    return communicationProfile->intraRank;
+  }
+
+  FailureOr<int64_t> modeledCommunicationCost(int64_t payloadBytes,
+                                              const LinkModel &model,
+                                              Operation *consumer) const {
+    const double bytes = static_cast<double>(payloadBytes);
+    double rate = 0;
+    if (model.ratePoints.empty()) {
+      rate = model.maxRateBytesPerMicrosecond * bytes /
+             (bytes + static_cast<double>(model.saturationBytes));
+    } else if (payloadBytes <= model.ratePoints.front().payloadBytes) {
+      const RatePoint &first = model.ratePoints.front();
+      rate = first.rateBytesPerMicrosecond * bytes /
+             static_cast<double>(first.payloadBytes);
+    } else if (payloadBytes >= model.ratePoints.back().payloadBytes) {
+      rate = model.ratePoints.back().rateBytesPerMicrosecond;
+    } else {
+      auto upper = std::upper_bound(
+          model.ratePoints.begin(), model.ratePoints.end(), payloadBytes,
+          [](int64_t payload, const RatePoint &point) {
+            return payload < point.payloadBytes;
+          });
+      const RatePoint &right = *upper;
+      const RatePoint &left = *(upper - 1);
+      const double fraction =
+          static_cast<double>(payloadBytes - left.payloadBytes) /
+          static_cast<double>(right.payloadBytes - left.payloadBytes);
+      rate = left.rateBytesPerMicrosecond +
+             fraction *
+                 (right.rateBytesPerMicrosecond - left.rateBytesPerMicrosecond);
+    }
+    rate = std::min(rate, model.maxRateBytesPerMicrosecond);
+    if (!std::isfinite(rate) || rate <= 0) {
+      consumer->emitError("communication profile produced an invalid rate");
+      return failure();
+    }
+    const double transfer = std::ceil(bytes / rate);
+    if (!std::isfinite(transfer) || transfer < 0 ||
+        transfer > static_cast<double>(std::numeric_limits<int64_t>::max() -
+                                       model.startupLatencyMicroseconds)) {
+      consumer->emitError("modeled communication cost is out of range");
+      return failure();
+    }
+    return model.startupLatencyMicroseconds + static_cast<int64_t>(transfer);
+  }
+
+  FailureOr<int64_t> communicationCost(Value value, const Place &source,
+                                       const Place &destination,
+                                       Operation *consumer) const {
+    if (source == destination)
+      return 0;
+    if (!communicationProfile)
+      return source.rank == destination.rank ? intraRankCost : interRankCost;
+    FailureOr<int64_t> payloadBytes = estimatePayloadBytes(value, consumer);
+    if (failed(payloadBytes))
+      return failure();
+    return modeledCommunicationCost(*payloadBytes,
+                                    linkModel(source, destination), consumer);
+  }
+
+  FailureOr<int64_t>
+  computeAverageCommunicationCost(Value value, Operation *consumer) const {
     __int128 total = 0;
-    for (const Place &source : candidates)
-      for (const Place &destination : candidates)
-        total += communicationCost(source, destination);
+    for (const Place &source : candidates) {
+      for (const Place &destination : candidates) {
+        FailureOr<int64_t> cost =
+            communicationCost(value, source, destination, consumer);
+        if (failed(cost))
+          return failure();
+        total += *cost;
+      }
+    }
     const __int128 count = static_cast<__int128>(candidates.size());
-    return static_cast<int64_t>(total / (count * count));
+    const __int128 average = total / (count * count);
+    if (average > std::numeric_limits<int64_t>::max()) {
+      consumer->emitError("average communication cost is out of range");
+      return failure();
+    }
+    return static_cast<int64_t>(average);
   }
 
   FailureOr<int64_t> priorityOf(size_t index,
@@ -381,13 +667,16 @@ private:
     }
     state[index] = 1;
     int64_t tail = 0;
+    FailureOr<int64_t> averageCommCost = computeAverageCommunicationCost(
+        nodes[index].op->getResult(0), nodes[index].op);
+    if (failed(averageCommCost))
+      return failure();
     for (size_t successor : nodes[index].successors) {
       FailureOr<int64_t> successorPriority = priorityOf(successor, state);
       if (failed(successorPriority))
         return failure();
       FailureOr<int64_t> candidate =
-          checkedAdd(averageCommCost, *successorPriority,
-                     nodes[index].op);
+          checkedAdd(*averageCommCost, *successorPriority, nodes[index].op);
       if (failed(candidate))
         return failure();
       tail = std::max(tail, *candidate);
@@ -422,9 +711,11 @@ private:
       if (localCopy != copiesForValue->second.end())
         return localCopy->second;
     }
-    return checkedAdd(origin->second.second,
-                      communicationCost(origin->second.first, destination),
-                      consumer);
+    FailureOr<int64_t> cost =
+        communicationCost(operand, origin->second.first, destination, consumer);
+    if (failed(cost))
+      return failure();
+    return checkedAdd(origin->second.second, *cost, consumer);
   }
 
   LogicalResult scheduleNode(size_t index) {
@@ -448,10 +739,10 @@ private:
       FailureOr<int64_t> finish = checkedAdd(start, node.cost, node.op);
       if (failed(finish))
         return failure();
-      if (!found || std::tie(*finish, start, candidatePlace.rank,
-                             candidatePlace.device) <
-                        std::tie(bestFinish, bestStart, bestPlace.rank,
-                                 bestPlace.device)) {
+      if (!found ||
+          std::tie(*finish, start, candidatePlace.rank, candidatePlace.device) <
+              std::tie(bestFinish, bestStart, bestPlace.rank,
+                       bestPlace.device)) {
         found = true;
         bestPlace = candidatePlace;
         bestStart = start;
@@ -488,8 +779,7 @@ private:
         if (candidate.scheduled || candidate.remainingPredecessors != 0)
           continue;
         if (selected == nodes.size() ||
-            std::tie(candidate.priority,
-                     nodes[selected].originalIndex) >
+            std::tie(candidate.priority, nodes[selected].originalIndex) >
                 std::tie(nodes[selected].priority, candidate.originalIndex))
           selected = index;
       }
@@ -512,10 +802,10 @@ private:
     for (const Node &node : nodes) {
       if (!node.scheduled || node.start < 0 || node.finish <= node.start ||
           node.finish - node.start != node.cost)
-        return node.op->emitError("placement produced an invalid time interval");
+        return node.op->emitError(
+            "placement produced an invalid time interval");
       for (Value operand : node.op->getOperands()) {
-        FailureOr<int64_t> arrival =
-            arrivalTime(operand, node.place, node.op);
+        FailureOr<int64_t> arrival = arrivalTime(operand, node.place, node.op);
         if (failed(arrival))
           return failure();
         if (node.start < *arrival)
@@ -562,13 +852,13 @@ private:
     launchOrder.reserve(nodes.size());
     for (Node &node : nodes)
       launchOrder.push_back(&node);
-    std::sort(launchOrder.begin(), launchOrder.end(), [](const Node *lhs,
-                                                         const Node *rhs) {
-      return std::tie(lhs->start, lhs->finish, lhs->place.rank,
-                      lhs->place.device, lhs->originalIndex) <
-             std::tie(rhs->start, rhs->finish, rhs->place.rank,
-                      rhs->place.device, rhs->originalIndex);
-    });
+    std::sort(launchOrder.begin(), launchOrder.end(),
+              [](const Node *lhs, const Node *rhs) {
+                return std::tie(lhs->start, lhs->finish, lhs->place.rank,
+                                lhs->place.device, lhs->originalIndex) <
+                       std::tie(rhs->start, rhs->finish, rhs->place.rank,
+                                rhs->place.device, rhs->originalIndex);
+              });
     Operation *terminator = func.getBody().front().getTerminator();
     for (Node *node : launchOrder)
       node->op->moveBefore(terminator);
@@ -580,7 +870,7 @@ private:
   std::string bootProfile;
   int64_t intraRankCost;
   int64_t interRankCost;
-  int64_t averageCommCost = 0;
+  std::optional<CommunicationProfile> communicationProfile;
   std::vector<Place> candidates;
   std::vector<Place> hostCandidates;
   std::vector<Node> nodes;
@@ -596,7 +886,8 @@ struct AssignPlacementPass
 
   void runOnOperation() override {
     func::FuncOp func = getOperation();
-    if (intraRankCommunicationCost <= 0 || interRankCommunicationCost <= 0) {
+    if (communicationProfilePath.empty() &&
+        (intraRankCommunicationCost <= 0 || interRankCommunicationCost <= 0)) {
       func.emitError("placement communication costs must be positive");
       signalPassFailure();
       return;
@@ -608,9 +899,20 @@ struct AssignPlacementPass
       signalPassFailure();
       return;
     }
+    std::optional<CommunicationProfile> communicationProfile;
+    if (!communicationProfilePath.empty()) {
+      FailureOr<CommunicationProfile> parsed =
+          readCommunicationProfile(communicationProfilePath, *spec, func);
+      if (failed(parsed)) {
+        signalPassFailure();
+        return;
+      }
+      communicationProfile = std::move(*parsed);
+    }
     PlacementScheduler scheduler(func, *spec, std::move(*counts), bootProfile,
                                  intraRankCommunicationCost,
-                                 interRankCommunicationCost);
+                                 interRankCommunicationCost,
+                                 std::move(communicationProfile));
     if (failed(scheduler.run()))
       signalPassFailure();
   }

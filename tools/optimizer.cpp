@@ -266,9 +266,14 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
   static cl::opt<std::string> runtime_plan_operator_spec_path{
       "runtime-plan-operator-spec-path",
       cl::desc("OperatorSpec V2 JSON used by placement"), cl::init("")};
+  static cl::opt<std::string> runtime_plan_communication_profile_path{
+      "runtime-plan-communication-profile-path",
+      cl::desc("Payload-aware communication profile JSON used by placement"),
+      cl::init("")};
   static cl::opt<std::string> runtime_plan_physical_level_operator_spec_path{
       "runtime-plan-physical-level-operator-spec-path",
-      cl::desc("Lazy-rescale target OperatorSpec used to materialize physical levels"),
+      cl::desc("Lazy-rescale target OperatorSpec used to materialize physical "
+               "levels"),
       cl::init("")};
   static cl::opt<int64_t> runtime_plan_levels_per_logical_level{
       "runtime-plan-levels-per-logical-level",
@@ -313,6 +318,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       placement.deviceCounts = runtime_plan_device_counts;
       placement.operatorSpecPath = runtime_plan_operator_spec_path;
       placement.bootProfile = runtime_plan_boot_profile;
+      placement.communicationProfilePath =
+          runtime_plan_communication_profile_path;
       placement.intraRankCommunicationCost =
           runtime_plan_intra_rank_communication_cost;
       placement.interRankCommunicationCost =

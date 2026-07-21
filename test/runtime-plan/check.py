@@ -79,11 +79,17 @@ def run_placement_pipeline(hecate_opt: Path, source_dir: Path, temp: Path,
                            device_counts: str, plan_id: int,
                            fixture: str = "placement-fanout",
                            function: str = "placement_fanout",
-                           boot_profile: str | None = None) -> tuple[dict, str]:
+                           boot_profile: str | None = None,
+                           communication_profile: Path | None = None,
+                           ) -> tuple[dict, str]:
     spec_path = source_dir / "test/runtime-plan/placement-operator-spec.json"
     spec_digest = "sha256:" + hashlib.sha256(spec_path.read_bytes()).hexdigest()
     prefix = temp / f"{fixture}-{device_counts}"
     boot_option = f" boot-profile={boot_profile}" if boot_profile else ""
+    communication_option = (
+        f" communication-profile={communication_profile}"
+        if communication_profile else ""
+    )
     emit_boot_option = (
         f" boot-profile={boot_profile} boot-implementation=decrypt_reencrypt"
         if boot_profile else ""
@@ -92,7 +98,8 @@ def run_placement_pipeline(hecate_opt: Path, source_dir: Path, temp: Path,
         "assign-ckks-placement{"
         f"device-counts={device_counts} operator-spec={spec_path} "
         "intra-rank-communication-cost=10 "
-        f"inter-rank-communication-cost=20{boot_option}}}"
+        f"inter-rank-communication-cost=20{boot_option}"
+        f"{communication_option}}}"
     )
     emit = (
         "emit-runtime-plan{"
@@ -454,6 +461,38 @@ def main() -> None:
                 ]
         assert re.search(r'"ckks\.bootstrapc".*dist\.device = -1',
                          placement_boot_mlir)
+
+        communication_profile = (
+            args.source_dir /
+            "test/runtime-plan/placement-communication-profile.json"
+        )
+        communication, communication_mlir = run_placement_pipeline(
+            args.hecate_opt, args.source_dir, temp, "2", 58,
+            fixture="placement-communication-model",
+            function="placement_communication_model",
+            communication_profile=communication_profile,
+        )
+        assert communication["target"]["device_counts"] == [2]
+        communication_schedule = {}
+        for line in communication_mlir.splitlines():
+            if '"ckks.' not in line or "dist.schedule_start" not in line:
+                continue
+            logical_id = int(re.search(
+                r"dist.logical_id = ([0-9]+)", line
+            ).group(1))
+            communication_schedule[logical_id] = (
+                int(re.search(r"dist.schedule_start = ([0-9]+)", line).group(1)),
+                int(re.search(r"dist.schedule_finish = ([0-9]+)", line).group(1)),
+                int(re.search(r"dist.device = (-?[0-9]+)", line).group(1)),
+            )
+        # Payload: 2 components * 6 limbs * degree 16 * 8 bytes = 1536 bytes.
+        # Host/device curve: 3 + ceil((1536 + 512) / 128) = 19 us.
+        # Intra-rank table interpolation: 2 + ceil(1536 / 106.66...) = 17 us.
+        assert communication_schedule == {
+            1: (19, 1019, 0),
+            2: (19, 1019, 1),
+            3: (1036, 1136, 0),
+        }
 
 
 if __name__ == "__main__":
