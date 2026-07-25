@@ -131,6 +131,41 @@ def place_key(place: dict) -> tuple[int, int]:
     return place["rank"], place.get("index", -1)
 
 
+def rotate_decomposition_term_count(step: int, slot_count: int) -> int:
+    normalized = step % slot_count
+    if normalized > slot_count // 2:
+        normalized -= slot_count
+    assert normalized != 0
+    return abs(normalized).bit_count()
+
+
+def verify_rotate_costs(mlir: str) -> None:
+    durations = {}
+    for line in mlir.splitlines():
+        if '"ckks.rotatec"' not in line or "dist.schedule_start" not in line:
+            continue
+        logical_id = int(re.search(
+            r"dist.logical_id = ([0-9]+)", line
+        ).group(1))
+        start = int(re.search(
+            r"dist.schedule_start = ([0-9]+)", line
+        ).group(1))
+        finish = int(re.search(
+            r"dist.schedule_finish = ([0-9]+)", line
+        ).group(1))
+        durations[logical_id] = finish - start
+
+    # poly_degree=16 gives 8 slots. Each Rotate costs 1000 us per nonzero
+    # signed-binary term after normalizing the step to the slot count.
+    assert durations == {
+        1: 1000, 2: 1000, 3: 2000, 4: 1000,
+        5: 2000, 6: 1000, 7: 1000,
+        8: 1000, 9: 1000, 10: 2000, 11: 1000,
+        12: 2000, 13: 1000, 14: 1000,
+        15: 1000, 16: 1000,
+    }
+
+
 def verify_placement(plan: dict, mlir: str,
                      expected_device_counts: list[int]) -> None:
     assert plan["target"]["world_size"] == len(expected_device_counts)
@@ -191,7 +226,15 @@ def verify_placement(plan: dict, mlir: str,
         start = int(re.search(r"dist.schedule_start = ([0-9]+)", line).group(1))
         finish = int(re.search(r"dist.schedule_finish = ([0-9]+)", line).group(1))
         op = re.search(r'"ckks\.([a-z]+)"', line).group(1)
-        expected_duration = 1000 if op == "rotatec" else 100
+        if op == "rotatec":
+            step = int(re.search(
+                r"offset = array<i64: (-?[0-9]+)>", line
+            ).group(1))
+            expected_duration = (
+                1000 * rotate_decomposition_term_count(step, 8)
+            )
+        else:
+            expected_duration = 100
         assert finish - start == expected_duration
         schedule[str(logical_id)] = (start, finish, (rank, device))
         intervals.setdefault((rank, device), []).append((start, finish))
@@ -435,6 +478,7 @@ def main() -> None:
             args.hecate_opt, args.source_dir, temp, "8", 18
         )
         verify_placement(placement_1x8, placement_1x8_mlir, [8])
+        verify_rotate_costs(placement_1x8_mlir)
         placement_1x8_repeat, placement_1x8_repeat_mlir = run_placement_pipeline(
             args.hecate_opt, args.source_dir, temp, "8", 18
         )

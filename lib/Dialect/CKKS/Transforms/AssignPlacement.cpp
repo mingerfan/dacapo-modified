@@ -314,6 +314,54 @@ llvm::StringRef operatorName(Operation *op) {
   return {};
 }
 
+FailureOr<int64_t> rotateDecompositionTermCount(ckks::RotateCOp op,
+                                                const Json &spec) {
+  auto context = spec.find("context");
+  if (context == spec.end() || !context->is_object()) {
+    op.emitError("OperatorSpec context must be an object");
+    return failure();
+  }
+  auto polyDegree = context->find("poly_degree");
+  if (polyDegree == context->end() || !polyDegree->is_number_integer()) {
+    op.emitError("OperatorSpec context poly_degree must be an integer");
+    return failure();
+  }
+  const int64_t degree = polyDegree->get<int64_t>();
+  const int64_t slotCount = degree / 2;
+  if (degree < 2 ||
+      slotCount > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+    op.emitError("OperatorSpec slot count is outside the supported rotation "
+                 "range");
+    return failure();
+  }
+
+  if (op.getOffset().size() != 1 || op.getOffset()[0] == 0 ||
+      op.getOffset()[0] < std::numeric_limits<int32_t>::min() ||
+      op.getOffset()[0] > std::numeric_limits<int32_t>::max()) {
+    op.emitError("placement Rotate requires exactly one nonzero int32 step");
+    return failure();
+  }
+  int64_t normalized = op.getOffset()[0] % slotCount;
+  const int64_t half = slotCount / 2;
+  if (normalized > half)
+    normalized -= slotCount;
+  else if (normalized <= -half)
+    normalized += slotCount;
+  if (normalized == 0) {
+    op.emitError("Rotate step becomes zero after slot-count normalization");
+    return failure();
+  }
+
+  uint64_t magnitude =
+      static_cast<uint64_t>(normalized < 0 ? -normalized : normalized);
+  int64_t terms = 0;
+  while (magnitude != 0) {
+    terms += static_cast<int64_t>(magnitude & 1);
+    magnitude >>= 1;
+  }
+  return terms;
+}
+
 FailureOr<int64_t> operationCost(Operation *op, const Json &spec,
                                  llvm::StringRef bootProfile,
                                  bool &requiresHost) {
@@ -413,6 +461,16 @@ FailureOr<int64_t> operationCost(Operation *op, const Json &spec,
     op->emitError("OperatorSpec latency must be positive for operator ")
         << name << " at level " << level;
     return failure();
+  }
+  if (auto rotate = dyn_cast<ckks::RotateCOp>(op)) {
+    FailureOr<int64_t> terms = rotateDecompositionTermCount(rotate, spec);
+    if (failed(terms))
+      return failure();
+    if (cost > std::numeric_limits<int64_t>::max() / *terms) {
+      op->emitError("placement cost overflow");
+      return failure();
+    }
+    return cost * *terms;
   }
   return cost;
 }
