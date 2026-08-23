@@ -13,6 +13,8 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace hecate {
@@ -73,13 +75,46 @@ struct LinkModel {
   std::vector<RatePoint> ratePoints;
 };
 
+enum class EndpointKind { Host, Device };
+
+struct EndpointSelector {
+  std::optional<EndpointKind> kind;
+  std::optional<int64_t> rank;
+  std::optional<int64_t> device;
+  std::optional<int64_t> node;
+};
+
+struct CommunicationRule {
+  std::string id;
+  EndpointSelector source;
+  EndpointSelector destination;
+  bool bidirectional = false;
+  std::string transport = "auto";
+  LinkModel model;
+};
+
+struct ResolvedLink {
+  const LinkModel *model = nullptr;
+  std::string ruleId;
+  std::string transport = "auto";
+};
+
 struct CommunicationProfile {
   int64_t coefficientBytes = 0;
   int64_t polyDegree = 0;
   int64_t modulusCount = 0;
-  LinkModel hostDevice;
-  LinkModel intraRank;
-  LinkModel interRank;
+  int64_t formatVersion = 1;
+  std::vector<int64_t> rankToNode;
+  std::optional<LinkModel> hostDevice;
+  std::optional<LinkModel> intraRank;
+  std::optional<LinkModel> interRank;
+  std::vector<CommunicationRule> rules;
+
+  FailureOr<ResolvedLink> resolve(const Place &source,
+                                   const Place &destination,
+                                   Operation *diagnostic) const;
+  LogicalResult validateTopology(llvm::ArrayRef<int64_t> deviceCounts,
+                                 Operation *diagnostic) const;
 };
 
 FailureOr<std::vector<int64_t>> parseDeviceCounts(llvm::StringRef encoded,
@@ -137,23 +172,23 @@ FailureOr<Json> readOperatorSpec(llvm::StringRef path, Operation *op) {
   return spec;
 }
 
-FailureOr<LinkModel> readLinkModel(const Json &links, llvm::StringRef name,
-                                   Operation *op) {
-  auto entry = links.find(name.str());
-  if (entry == links.end() || !entry->is_object()) {
+FailureOr<LinkModel> readLinkModelObject(const Json &entry,
+                                         llvm::StringRef name,
+                                         Operation *op) {
+  if (!entry.is_object()) {
     op->emitError("communication profile is missing link model ") << name;
     return failure();
   }
-  auto startup = entry->find("startup_latency_us");
-  auto maxRate = entry->find("max_rate_bytes_per_us");
-  auto saturation = entry->find("saturation_bytes");
-  if (startup == entry->end() || !startup->is_number_integer() ||
+  auto startup = entry.find("startup_latency_us");
+  auto maxRate = entry.find("max_rate_bytes_per_us");
+  auto saturation = entry.find("saturation_bytes");
+  if (startup == entry.end() || !startup->is_number_integer() ||
       startup->get<int64_t>() < 0) {
     op->emitError("communication profile ")
         << name << ".startup_latency_us must be a nonnegative integer";
     return failure();
   }
-  if (maxRate == entry->end() || !maxRate->is_number()) {
+  if (maxRate == entry.end() || !maxRate->is_number()) {
     op->emitError("communication profile ")
         << name << ".max_rate_bytes_per_us must be a positive number";
     return failure();
@@ -164,7 +199,7 @@ FailureOr<LinkModel> readLinkModel(const Json &links, llvm::StringRef name,
         << name << ".max_rate_bytes_per_us must be a positive finite number";
     return failure();
   }
-  if (saturation == entry->end() || !saturation->is_number_integer() ||
+  if (saturation == entry.end() || !saturation->is_number_integer() ||
       saturation->get<int64_t>() <= 0) {
     op->emitError("communication profile ")
         << name << ".saturation_bytes must be a positive integer";
@@ -175,8 +210,8 @@ FailureOr<LinkModel> readLinkModel(const Json &links, llvm::StringRef name,
   model.startupLatencyMicroseconds = startup->get<int64_t>();
   model.maxRateBytesPerMicrosecond = maxRateValue;
   model.saturationBytes = saturation->get<int64_t>();
-  auto points = entry->find("rate_points");
-  if (points == entry->end())
+  auto points = entry.find("rate_points");
+  if (points == entry.end())
     return model;
   if (!points->is_array() || points->empty()) {
     op->emitError("communication profile ")
@@ -225,6 +260,199 @@ FailureOr<LinkModel> readLinkModel(const Json &links, llvm::StringRef name,
   return model;
 }
 
+FailureOr<LinkModel> readLinkModel(const Json &links, llvm::StringRef name,
+                                   Operation *op) {
+  auto entry = links.find(name.str());
+  if (entry == links.end() || !entry->is_object()) {
+    op->emitError("communication profile is missing link model ") << name;
+    return failure();
+  }
+  return readLinkModelObject(*entry, name, op);
+}
+
+LogicalResult readSelectorInteger(const Json &object, llvm::StringRef field,
+                                  std::optional<int64_t> &result,
+                                  Operation *diagnostic) {
+  auto value = object.find(field.str());
+  if (value == object.end())
+    return success();
+  if (value->is_string() && value->get<std::string>() == "*") {
+    result.reset();
+    return success();
+  }
+  if (!value->is_number_integer() || value->get<int64_t>() < 0) {
+    diagnostic->emitError("communication rule selector ")
+        << field << " must be a nonnegative integer or '*';";
+    return failure();
+  }
+  result = value->get<int64_t>();
+  return success();
+}
+
+FailureOr<EndpointSelector> readEndpointSelector(const Json &value,
+                                                  llvm::StringRef path,
+                                                  Operation *diagnostic) {
+  EndpointSelector result;
+  if (value.is_string() && value.get<std::string>() == "*")
+    return result;
+  if (!value.is_object()) {
+    diagnostic->emitError("communication rule ")
+        << path << " must be an object or '*';";
+    return failure();
+  }
+
+  auto kind = value.find("kind");
+  if (kind != value.end()) {
+    if (!kind->is_string()) {
+      diagnostic->emitError("communication rule ")
+          << path << ".kind must be 'host' or 'device';";
+      return failure();
+    }
+    const std::string kindName = kind->get<std::string>();
+    if (kindName == "host")
+      result.kind = EndpointKind::Host;
+    else if (kindName == "device")
+      result.kind = EndpointKind::Device;
+    else {
+      diagnostic->emitError("communication rule ")
+          << path << ".kind must be 'host' or 'device';";
+      return failure();
+    }
+  }
+
+  if (failed(readSelectorInteger(value, "rank", result.rank, diagnostic)) ||
+      failed(readSelectorInteger(value, "device", result.device, diagnostic)) ||
+      failed(readSelectorInteger(value, "node", result.node, diagnostic)))
+    return failure();
+
+  if (result.kind == EndpointKind::Host && result.device.has_value()) {
+    diagnostic->emitError("communication rule ")
+        << path << " cannot constrain device for a host endpoint;";
+    return failure();
+  }
+  return result;
+}
+
+FailureOr<CommunicationRule> readCommunicationRule(const Json &value,
+                                                    std::size_t index,
+                                                    Operation *diagnostic) {
+  if (!value.is_object()) {
+    diagnostic->emitError("communication profile rules[")
+        << index << "] must be an object;";
+    return failure();
+  }
+
+  CommunicationRule result;
+  auto id = value.find("id");
+  if (id == value.end()) {
+    result.id = "rule_" + std::to_string(index);
+  } else if (!id->is_string() || id->get<std::string>().empty()) {
+    diagnostic->emitError("communication profile rules[")
+        << index << "].id must be a nonempty string;";
+    return failure();
+  } else {
+    result.id = id->get<std::string>();
+  }
+
+  auto source = value.find("from");
+  auto destination = value.find("to");
+  if (source == value.end() || destination == value.end()) {
+    diagnostic->emitError("communication profile rules[")
+        << index << "] requires 'from' and 'to';";
+    return failure();
+  }
+  FailureOr<EndpointSelector> parsedSource = readEndpointSelector(
+      *source, "rules[" + std::to_string(index) + "].from", diagnostic);
+  FailureOr<EndpointSelector> parsedDestination = readEndpointSelector(
+      *destination, "rules[" + std::to_string(index) + "].to", diagnostic);
+  if (failed(parsedSource) || failed(parsedDestination))
+    return failure();
+  result.source = std::move(*parsedSource);
+  result.destination = std::move(*parsedDestination);
+
+  auto direction = value.find("direction");
+  if (direction != value.end()) {
+    if (!direction->is_string()) {
+      diagnostic->emitError("communication profile rules[")
+          << index << "].direction must be 'forward' or 'both';";
+      return failure();
+    }
+    const std::string directionName = direction->get<std::string>();
+    if (directionName == "both")
+      result.bidirectional = true;
+    else if (directionName != "forward") {
+      diagnostic->emitError("communication profile rules[")
+          << index << "].direction must be 'forward' or 'both';";
+      return failure();
+    }
+  }
+
+  auto transport = value.find("transport");
+  if (transport != value.end()) {
+    if (!transport->is_string() || transport->get<std::string>().empty()) {
+      diagnostic->emitError("communication profile rules[")
+          << index << "].transport must be a nonempty string;";
+      return failure();
+    }
+    result.transport = transport->get<std::string>();
+  }
+
+  auto cost = value.find("cost");
+  if (cost == value.end() || !cost->is_object()) {
+    diagnostic->emitError("communication profile rules[")
+        << index << "].cost must be an object;";
+    return failure();
+  }
+  FailureOr<LinkModel> model = readLinkModelObject(
+      *cost, "rules[" + std::to_string(index) + "].cost", diagnostic);
+  if (failed(model))
+    return failure();
+  result.model = std::move(*model);
+  return result;
+}
+
+bool selectorUsesNode(const EndpointSelector &selector) {
+  return selector.node.has_value();
+}
+
+std::optional<int64_t> nodeForRank(const std::vector<int64_t> &rankToNode,
+                                   int64_t rank) {
+  if (rank < 0 || rank >= static_cast<int64_t>(rankToNode.size()))
+    return std::nullopt;
+  return rankToNode[static_cast<std::size_t>(rank)];
+}
+
+bool selectorMatches(const EndpointSelector &selector, const Place &place,
+                     std::optional<int64_t> node) {
+  const EndpointKind actualKind =
+      place.device < 0 ? EndpointKind::Host : EndpointKind::Device;
+  if (selector.kind.has_value() && selector.kind.value() != actualKind)
+    return false;
+  if (selector.rank.has_value() && selector.rank.value() != place.rank)
+    return false;
+  if (selector.device.has_value() && selector.device.value() != place.device)
+    return false;
+  if (selector.node.has_value() &&
+      (!node.has_value() || selector.node.value() != node.value()))
+    return false;
+  return true;
+}
+
+bool ruleMatches(const CommunicationRule &rule, const Place &source,
+                 const Place &destination,
+                 std::optional<int64_t> sourceNode,
+                 std::optional<int64_t> destinationNode) {
+  const bool forward =
+      selectorMatches(rule.source, source, sourceNode) &&
+      selectorMatches(rule.destination, destination, destinationNode);
+  if (forward)
+    return true;
+  if (!rule.bidirectional)
+    return false;
+  return selectorMatches(rule.source, destination, destinationNode) &&
+         selectorMatches(rule.destination, source, sourceNode);
+}
+
 FailureOr<CommunicationProfile>
 readCommunicationProfile(llvm::StringRef path, const Json &operatorSpec,
                          Operation *op) {
@@ -242,17 +470,19 @@ readCommunicationProfile(llvm::StringRef path, const Json &operatorSpec,
   auto coefficientBytes = profile.find("coefficient_bytes");
   auto links = profile.find("links");
   if (version == profile.end() || !version->is_number_integer() ||
-      version->get<int64_t>() != 1) {
-    op->emitError("communication profile format_version must be 1");
+      (version->get<int64_t>() != 1 && version->get<int64_t>() != 2)) {
+    op->emitError("communication profile format_version must be 1 or 2");
     return failure();
   }
+  const int64_t formatVersion = version->get<int64_t>();
   if (coefficientBytes == profile.end() ||
       !coefficientBytes->is_number_integer() ||
       coefficientBytes->get<int64_t>() <= 0) {
     op->emitError("communication profile coefficient_bytes must be positive");
     return failure();
   }
-  if (links == profile.end() || !links->is_object()) {
+  if (formatVersion == 1 &&
+      (links == profile.end() || !links->is_object())) {
     op->emitError("communication profile links must be an object");
     return failure();
   }
@@ -274,20 +504,156 @@ readCommunicationProfile(llvm::StringRef path, const Json &operatorSpec,
     return failure();
   }
 
-  FailureOr<LinkModel> hostDevice = readLinkModel(*links, "host_device", op);
-  FailureOr<LinkModel> intraRank = readLinkModel(*links, "intra_rank", op);
-  FailureOr<LinkModel> interRank = readLinkModel(*links, "inter_rank", op);
-  if (failed(hostDevice) || failed(intraRank) || failed(interRank))
-    return failure();
-
   CommunicationProfile result;
+  result.formatVersion = formatVersion;
   result.coefficientBytes = coefficientBytes->get<int64_t>();
   result.polyDegree = polyDegree->get<int64_t>();
   result.modulusCount = static_cast<int64_t>(moduli->size());
-  result.hostDevice = std::move(*hostDevice);
-  result.intraRank = std::move(*intraRank);
-  result.interRank = std::move(*interRank);
+
+  if (links != profile.end()) {
+    if (!links->is_object()) {
+      op->emitError("communication profile links must be an object");
+      return failure();
+    }
+    auto readOptional = [&](llvm::StringRef name,
+                            std::optional<LinkModel> &destination) {
+      auto entry = links->find(name.str());
+      if (entry == links->end())
+        return success();
+      FailureOr<LinkModel> model = readLinkModel(*links, name, op);
+      if (failed(model))
+        return failure();
+      destination = std::move(*model);
+      return success();
+    };
+    if (failed(readOptional("host_device", result.hostDevice)) ||
+        failed(readOptional("intra_rank", result.intraRank)) ||
+        failed(readOptional("inter_rank", result.interRank)))
+      return failure();
+  }
+
+  if (formatVersion == 1 &&
+      (!result.hostDevice.has_value() || !result.intraRank.has_value() ||
+       !result.interRank.has_value())) {
+    op->emitError(
+        "communication profile V1 requires host_device, intra_rank and "
+        "inter_rank link models");
+    return failure();
+  }
+
+  auto topology = profile.find("topology");
+  if (topology != profile.end()) {
+    if (!topology->is_object()) {
+      op->emitError("communication profile topology must be an object");
+      return failure();
+    }
+    auto rankToNode = topology->find("rank_to_node");
+    if (rankToNode == topology->end() || !rankToNode->is_array() ||
+        rankToNode->empty()) {
+      op->emitError(
+          "communication profile topology.rank_to_node must be a nonempty "
+          "array");
+      return failure();
+    }
+    for (const Json &node : *rankToNode) {
+      if (!node.is_number_integer() || node.get<int64_t>() < 0) {
+        op->emitError(
+            "communication profile topology.rank_to_node values must be "
+            "nonnegative integers");
+        return failure();
+      }
+      result.rankToNode.push_back(node.get<int64_t>());
+    }
+  }
+
+  auto rules = profile.find("rules");
+  if (rules != profile.end()) {
+    if (!rules->is_array()) {
+      op->emitError("communication profile rules must be an array");
+      return failure();
+    }
+    for (std::size_t index = 0; index < rules->size(); ++index) {
+      FailureOr<CommunicationRule> rule =
+          readCommunicationRule((*rules)[index], index, op);
+      if (failed(rule))
+        return failure();
+      result.rules.push_back(std::move(*rule));
+    }
+  }
+
+  if (formatVersion == 2 && result.rules.empty() &&
+      !result.hostDevice.has_value() && !result.intraRank.has_value() &&
+      !result.interRank.has_value()) {
+    op->emitError(
+        "communication profile V2 requires rules or legacy link models");
+    return failure();
+  }
   return result;
+}
+
+FailureOr<ResolvedLink> CommunicationProfile::resolve(
+    const Place &source, const Place &destination, Operation *diagnostic) const {
+  const std::optional<int64_t> sourceNode = nodeForRank(rankToNode, source.rank);
+  const std::optional<int64_t> destinationNode =
+      nodeForRank(rankToNode, destination.rank);
+
+  for (const CommunicationRule &rule : rules) {
+    if (!ruleMatches(rule, source, destination, sourceNode, destinationNode))
+      continue;
+    return ResolvedLink{&rule.model, rule.id, rule.transport};
+  }
+
+  const LinkModel *fallback = nullptr;
+  std::string fallbackId;
+  if (source.rank == destination.rank) {
+    if (source.device < 0 || destination.device < 0) {
+      if (hostDevice.has_value()) {
+        fallback = &*hostDevice;
+        fallbackId = "legacy.host_device";
+      }
+    } else if (intraRank.has_value()) {
+      fallback = &*intraRank;
+      fallbackId = "legacy.intra_rank";
+    }
+  } else if (interRank.has_value()) {
+    fallback = &*interRank;
+    fallbackId = "legacy.inter_rank";
+  }
+
+  if (fallback != nullptr)
+    return ResolvedLink{fallback, std::move(fallbackId), "auto"};
+
+  diagnostic->emitError("communication profile has no matching rule or "
+                        "legacy fallback for Place pair ")
+      << "(" << source.rank << "," << source.device << ") -> ("
+      << destination.rank << "," << destination.device << ")";
+  return failure();
+}
+
+LogicalResult CommunicationProfile::validateTopology(
+    llvm::ArrayRef<int64_t> deviceCounts, Operation *diagnostic) const {
+  bool usesNodeSelector = false;
+  for (const CommunicationRule &rule : rules)
+    usesNodeSelector = usesNodeSelector || selectorUsesNode(rule.source) ||
+                       selectorUsesNode(rule.destination);
+
+  if (rankToNode.empty()) {
+    if (usesNodeSelector) {
+      diagnostic->emitError(
+          "communication rules use node selectors but topology.rank_to_node "
+          "is missing");
+      return failure();
+    }
+    return success();
+  }
+
+  if (rankToNode.size() != deviceCounts.size()) {
+    diagnostic->emitError(
+        "communication topology rank_to_node length does not match "
+        "device-counts rank count");
+    return failure();
+  }
+  return success();
 }
 
 llvm::StringRef operatorName(Operation *op) {
@@ -627,15 +993,6 @@ private:
     return static_cast<int64_t>(bytes);
   }
 
-  const LinkModel &linkModel(const Place &source,
-                             const Place &destination) const {
-    if (source.rank != destination.rank)
-      return communicationProfile->interRank;
-    if (source.device < 0 || destination.device < 0)
-      return communicationProfile->hostDevice;
-    return communicationProfile->intraRank;
-  }
-
   FailureOr<int64_t> modeledCommunicationCost(int64_t payloadBytes,
                                               const LinkModel &model,
                                               Operation *consumer) const {
@@ -690,8 +1047,15 @@ private:
     FailureOr<int64_t> payloadBytes = estimatePayloadBytes(value, consumer);
     if (failed(payloadBytes))
       return failure();
-    return modeledCommunicationCost(*payloadBytes,
-                                    linkModel(source, destination), consumer);
+    FailureOr<ResolvedLink> link =
+        communicationProfile->resolve(source, destination, consumer);
+    if (failed(link))
+      return failure();
+    if (link->model == nullptr) {
+      consumer->emitError("communication profile resolved a null link model");
+      return failure();
+    }
+    return modeledCommunicationCost(*payloadBytes, *link->model, consumer);
   }
 
   FailureOr<int64_t>
@@ -962,6 +1326,10 @@ struct AssignPlacementPass
       FailureOr<CommunicationProfile> parsed =
           readCommunicationProfile(communicationProfilePath, *spec, func);
       if (failed(parsed)) {
+        signalPassFailure();
+        return;
+      }
+      if (failed(parsed->validateTopology(*counts, func))) {
         signalPassFailure();
         return;
       }

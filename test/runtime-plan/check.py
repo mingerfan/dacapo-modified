@@ -558,6 +558,38 @@ def main() -> None:
             3: (1036, 1136, 0),
         }
 
+        rule_profile = (
+            args.source_dir /
+            "test/runtime-plan/placement-communication-rules.json"
+        )
+        ruled, ruled_mlir = run_placement_pipeline(
+            args.hecate_opt, args.source_dir, temp, "2", 59,
+            fixture="placement-communication-model",
+            function="placement_communication_model",
+            communication_profile=rule_profile,
+        )
+        assert ruled["target"]["device_counts"] == [2]
+        ruled_schedule = {}
+        for line in ruled_mlir.splitlines():
+            if '"ckks.' not in line or "dist.schedule_start" not in line:
+                continue
+            logical_id = int(re.search(
+                r"dist.logical_id = ([0-9]+)", line
+            ).group(1))
+            ruled_schedule[logical_id] = (
+                int(re.search(r"dist.schedule_start = ([0-9]+)", line).group(1)),
+                int(re.search(r"dist.schedule_finish = ([0-9]+)", line).group(1)),
+                int(re.search(r"dist.device = (-?[0-9]+)", line).group(1)),
+            )
+        # The exact device-pair rule is ordered before the legacy intra-rank
+        # fallback. It therefore increases the device-1 -> device-0 arrival
+        # cost without changing Host -> Device uploads.
+        assert ruled_schedule == {
+            1: (19, 1019, 0),
+            2: (19, 1019, 1),
+            3: (2756, 2856, 0),
+        }
+
 
 if __name__ == "__main__":
     main()
