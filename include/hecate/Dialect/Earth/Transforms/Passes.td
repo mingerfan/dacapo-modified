@@ -154,6 +154,24 @@ def BootstrapPlacement : Pass<"bootstrapping-placement", "::mlir::func::FuncOp">
   }];
 }
 
+def GreedyBootstrapPlacement : Pass<"greedy-bootstrap-placement", "::mlir::func::FuncOp"> {
+  let summary = "Insert bootstraps with lazy refresh or depth-boundary DP";
+  let description = [{
+    Normalize each multiplication to the waterline scale. Before a multiplication
+    exhausts the bootstrap input level budget, refresh its exhausted inputs.
+    Optional depth-boundary dynamic programming refreshes narrow frontiers.
+    Neither strategy clones functions or runs bypass simulation.
+  }];
+  let options = [
+    Option<"waterline", "waterline", "int64_t", /*default=*/"40",
+      "Ciphertext scale after each multiplication">,
+    Option<"output_val", "output-val", "int64_t", /*default=*/"10",
+      "Output value upper bound used for return level refinement">,
+    Option<"depth_dp", "depth-dp", "bool", /*default=*/"false",
+      "Choose multiplicative-depth boundaries with dynamic programming">,
+  ];
+}
+
 def CoverageRecorder : Pass<"coverage-recording", "::mlir::func::FuncOp"> {
   let summary = "Recording Coverage";
   let description = [{

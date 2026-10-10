@@ -218,6 +218,17 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       cl::desc("scale coverage threshold of DaCapo, 0 <= threshold <= 1"),
       cl::init(0.5)};
 
+  enum class BootstrapStrategy { Optimized, Greedy, DepthDP };
+  static cl::opt<BootstrapStrategy> bootstrap_strategy{
+      "boot-placement", cl::desc("Bootstrap placement strategy for --dacapo"),
+      cl::values(clEnumValN(BootstrapStrategy::Optimized, "optimized",
+                            "Search bootstrap candidates with DaCapo"),
+                 clEnumValN(BootstrapStrategy::Greedy, "greedy",
+                            "Refresh exhausted inputs with a forward scan"),
+                 clEnumValN(BootstrapStrategy::DepthDP, "depth-dp",
+                            "Choose narrow depth boundaries with dynamic programming")),
+      cl::init(BootstrapStrategy::Optimized)};
+
   static cl::opt<bool> enable_printer{
       "enable-debug-printer",
       cl::desc(
@@ -403,6 +414,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
         pm.addNestedPass<func::FuncOp>(
             hecate::ckks::createUpscaleToMulcpConversionPass());
+        // Share equal encodings before placement and lifetime planning.
+        pm.addNestedPass<func::FuncOp>(createCSEPass());
 
         if (enable_printer)
           pm.addPass(createLocationSnapshotPass(
@@ -446,6 +459,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
         pm.addNestedPass<func::FuncOp>(
             hecate::ckks::createUpscaleToMulcpConversionPass());
+        // Share equal encodings before placement and lifetime planning.
+        pm.addNestedPass<func::FuncOp>(createCSEPass());
 
         if (enable_printer)
           pm.addPass(createLocationSnapshotPass(
@@ -502,6 +517,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
         pm.addNestedPass<func::FuncOp>(
             hecate::ckks::createUpscaleToMulcpConversionPass());
+        // Share equal encodings before placement and lifetime planning.
+        pm.addNestedPass<func::FuncOp>(createCSEPass());
         pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
         addRuntimePlanExport(pm, (std::filesystem::path(dir) / stem).string());
       });
@@ -520,16 +537,23 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
           pm.addPass(hecate::earth::createSMUChecker());
 
         pm.addNestedPass<func::FuncOp>(hecate::earth::createRemoveBootstrap());
-        pm.addNestedPass<func::FuncOp>(
-            hecate::earth::createBypassDetection({waterline, 0.5}));
-        pm.addNestedPass<func::FuncOp>(
-            hecate::earth::createCandidateSelection({waterline, output_val}));
-        pm.addNestedPass<func::FuncOp>(
-            hecate::earth::createDaCapoPlanner({waterline, output_val}));
-        pm.addNestedPass<func::FuncOp>(
-            hecate::earth::createBootstrapPlacement());
-        pm.addNestedPass<func::FuncOp>(
-            hecate::earth::createProactiveRescaling({waterline, output_val}));
+        if (bootstrap_strategy != BootstrapStrategy::Optimized) {
+          pm.addNestedPass<func::FuncOp>(
+              hecate::earth::createGreedyBootstrapPlacement(
+                  {waterline, output_val,
+                   bootstrap_strategy == BootstrapStrategy::DepthDP}));
+        } else {
+          pm.addNestedPass<func::FuncOp>(
+              hecate::earth::createBypassDetection({waterline, 0.5}));
+          pm.addNestedPass<func::FuncOp>(
+              hecate::earth::createCandidateSelection({waterline, output_val}));
+          pm.addNestedPass<func::FuncOp>(
+              hecate::earth::createDaCapoPlanner({waterline, output_val}));
+          pm.addNestedPass<func::FuncOp>(
+              hecate::earth::createBootstrapPlacement());
+          pm.addNestedPass<func::FuncOp>(
+              hecate::earth::createProactiveRescaling({waterline, output_val}));
+        }
         /* pm.addNestedPass<func::FuncOp>( */
         /*     hecate::earth::createSNRRescaling({waterline, output_val})); */
         pm.addNestedPass<func::FuncOp>(hecate::earth::createEarlyModswitch());
@@ -552,6 +576,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
         pm.addNestedPass<func::FuncOp>(
             hecate::ckks::createUpscaleToMulcpConversionPass());
+        // Share equal encodings before placement and lifetime planning.
+        pm.addNestedPass<func::FuncOp>(createCSEPass());
 
         if (enable_printer)
           pm.addPass(createLocationSnapshotPass(
@@ -593,6 +619,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
         pm.addNestedPass<func::FuncOp>(
             hecate::ckks::createUpscaleToMulcpConversionPass());
+        // Share equal encodings before placement and lifetime planning.
+        pm.addNestedPass<func::FuncOp>(createCSEPass());
 
         if (enable_printer)
           pm.addPass(createLocationSnapshotPass(

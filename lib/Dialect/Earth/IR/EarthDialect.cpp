@@ -239,7 +239,8 @@ void hecate::earth::ModswitchOp::getCanonicalizationPatterns(
 void hecate::earth::UpscaleOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
   patterns
-      .add<UpscaleUpscalePattern, UpscaleConstantPattern, ZeroUpscalePattern>(
+      .add<UpscaleUpscalePattern, UpscaleConstantPattern,
+           UpscaleMulConstantPattern, ZeroUpscalePattern>(
           context);
 }
 

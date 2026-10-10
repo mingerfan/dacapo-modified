@@ -12,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <queue>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -849,25 +850,47 @@ FailureOr<int64_t> checkedAdd(int64_t lhs, int64_t rhs, Operation *op) {
   return lhs + rhs;
 }
 
-int64_t earliestSlot(const std::vector<Interval> &intervals, int64_t ready,
+// Merge touching occupied ranges. Search from ready instead of scanning the
+// entire schedule; merging does not change any available gap.
+using Schedule = std::map<int64_t, int64_t>;
+
+int64_t earliestSlot(const Schedule &intervals, int64_t ready,
                      int64_t duration) {
   int64_t start = ready;
-  for (const Interval &interval : intervals) {
-    if (start <= interval.start && duration <= interval.start - start)
+  auto position = intervals.upper_bound(ready);
+  if (position != intervals.begin()) {
+    auto previous = std::prev(position);
+    start = std::max(start, previous->second);
+  }
+  for (; position != intervals.end(); ++position) {
+    if (start <= position->first && duration <= position->first - start)
       return start;
-    if (start < interval.finish)
-      start = interval.finish;
+    start = std::max(start, position->second);
   }
   return start;
 }
 
-void insertInterval(std::vector<Interval> &intervals, Interval added) {
-  auto position =
-      std::lower_bound(intervals.begin(), intervals.end(), added.start,
-                       [](const Interval &interval, int64_t start) {
-                         return interval.start < start;
-                       });
-  intervals.insert(position, added);
+bool insertInterval(Schedule &intervals, Interval added) {
+  auto position = intervals.lower_bound(added.start);
+  if (position != intervals.begin()) {
+    auto previous = std::prev(position);
+    if (previous->second > added.start)
+      return false;
+    if (previous->second == added.start) {
+      added.start = previous->first;
+      intervals.erase(previous);
+    }
+  }
+  if (position != intervals.end()) {
+    if (position->first < added.finish)
+      return false;
+    if (position->first == added.finish) {
+      added.finish = position->second;
+      intervals.erase(position);
+    }
+  }
+  intervals.emplace(added.start, added.finish);
+  return true;
 }
 
 class PlacementScheduler {
@@ -1079,44 +1102,28 @@ private:
     return static_cast<int64_t>(average);
   }
 
-  FailureOr<int64_t> priorityOf(size_t index,
-                                std::vector<unsigned char> &state) {
-    if (state[index] == 2)
-      return nodes[index].priority;
-    if (state[index] == 1) {
-      nodes[index].op->emitError("cycle detected in placement graph");
-      return failure();
-    }
-    state[index] = 1;
-    int64_t tail = 0;
-    FailureOr<int64_t> averageCommCost = computeAverageCommunicationCost(
-        nodes[index].op->getResult(0), nodes[index].op);
-    if (failed(averageCommCost))
-      return failure();
-    for (size_t successor : nodes[index].successors) {
-      FailureOr<int64_t> successorPriority = priorityOf(successor, state);
-      if (failed(successorPriority))
-        return failure();
-      FailureOr<int64_t> candidate =
-          checkedAdd(*averageCommCost, *successorPriority, nodes[index].op);
-      if (failed(candidate))
-        return failure();
-      tail = std::max(tail, *candidate);
-    }
-    FailureOr<int64_t> result =
-        checkedAdd(nodes[index].cost, tail, nodes[index].op);
-    if (failed(result))
-      return failure();
-    nodes[index].priority = *result;
-    state[index] = 2;
-    return *result;
-  }
-
   LogicalResult computePriorities() {
-    std::vector<unsigned char> state(nodes.size(), 0);
-    for (size_t index = 0; index < nodes.size(); ++index)
-      if (failed(priorityOf(index, state)))
+    // Single-block SSA is already in dependency order. Avoid recursion along
+    // potentially millions of instructions while retaining the same ranks.
+    for (size_t index = nodes.size(); index-- > 0;) {
+      Node &node = nodes[index];
+      auto average = computeAverageCommunicationCost(node.op->getResult(0), node.op);
+      if (failed(average))
         return failure();
+      int64_t tail = 0;
+      for (size_t successor : node.successors) {
+        if (successor <= index)
+          return node.op->emitError("placement graph is not in SSA dependency order");
+        auto candidate = checkedAdd(*average, nodes[successor].priority, node.op);
+        if (failed(candidate))
+          return failure();
+        tail = std::max(tail, *candidate);
+      }
+      auto result = checkedAdd(node.cost, tail, node.op);
+      if (failed(result))
+        return failure();
+      node.priority = *result;
+    }
     return success();
   }
 
@@ -1178,7 +1185,8 @@ private:
     node.start = bestStart;
     node.finish = bestFinish;
     node.scheduled = true;
-    insertInterval(schedules[bestPlace], Interval{bestStart, bestFinish});
+    if (!insertInterval(schedules[bestPlace], Interval{bestStart, bestFinish}))
+      return node.op->emitError("placement overlaps operations at one place");
     for (Value operand : node.op->getOperands()) {
       if (!copies[operand].count(bestPlace)) {
         FailureOr<int64_t> arrival = arrivalTime(operand, bestPlace, node.op);
@@ -1193,20 +1201,21 @@ private:
   }
 
   LogicalResult schedule() {
+    auto lowerPriority = [&](size_t lhs, size_t rhs) {
+      return std::tie(nodes[lhs].priority, nodes[rhs].originalIndex) <
+             std::tie(nodes[rhs].priority, nodes[lhs].originalIndex);
+    };
+    std::priority_queue<size_t, std::vector<size_t>, decltype(lowerPriority)>
+        ready(lowerPriority);
+    for (size_t index = 0; index < nodes.size(); ++index)
+      if (nodes[index].remainingPredecessors == 0)
+        ready.push(index);
     size_t scheduledCount = 0;
     while (scheduledCount != nodes.size()) {
-      size_t selected = nodes.size();
-      for (size_t index = 0; index < nodes.size(); ++index) {
-        const Node &candidate = nodes[index];
-        if (candidate.scheduled || candidate.remainingPredecessors != 0)
-          continue;
-        if (selected == nodes.size() ||
-            std::tie(candidate.priority, nodes[selected].originalIndex) >
-                std::tie(nodes[selected].priority, candidate.originalIndex))
-          selected = index;
-      }
-      if (selected == nodes.size())
+      if (ready.empty())
         return func.emitError("placement graph has no ready operation");
+      size_t selected = ready.top();
+      ready.pop();
       if (failed(scheduleNode(selected)))
         return failure();
       ++scheduledCount;
@@ -1215,6 +1224,8 @@ private:
           return nodes[successor].op->emitError(
               "invalid placement predecessor count");
         --nodes[successor].remainingPredecessors;
+        if (nodes[successor].remainingPredecessors == 0)
+          ready.push(successor);
       }
     }
     return success();
@@ -1237,9 +1248,12 @@ private:
     }
     for (const auto &[place, intervals] : schedules) {
       static_cast<void>(place);
-      for (size_t index = 1; index < intervals.size(); ++index)
-        if (intervals[index - 1].finish > intervals[index].start)
+      int64_t finish = 0;
+      for (const auto &[start, end] : intervals) {
+        if (finish > start)
           return func.emitError("placement overlaps operations at one place");
+        finish = end;
+      }
     }
     return success();
   }
@@ -1299,7 +1313,7 @@ private:
   llvm::DenseMap<Operation *, size_t> opToNode;
   llvm::DenseMap<Value, std::pair<Place, int64_t>> origins;
   llvm::DenseMap<Value, std::map<Place, int64_t>> copies;
-  std::map<Place, std::vector<Interval>> schedules;
+  std::map<Place, Schedule> schedules;
 };
 
 struct AssignPlacementPass

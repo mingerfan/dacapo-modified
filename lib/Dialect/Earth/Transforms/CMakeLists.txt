@@ -3,6 +3,7 @@ add_mlir_dialect_library(EarthTransforms
  ElideConstant.cpp
  PrivatizeConstant.cpp
  BootstrapPlacement.cpp
+ GreedyBootstrapPlacement.cpp
  CodeSegmentation.cpp
  Common.cpp
  UpscaleBubbling.cpp

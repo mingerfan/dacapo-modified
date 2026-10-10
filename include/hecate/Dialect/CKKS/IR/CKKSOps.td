@@ -8,6 +8,7 @@ include "mlir/IR/OpBase.td"
 include "mlir/IR/PatternBase.td"
 // Provides SameOperandsAndResultType/Shape traits only.
 include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 include "hecate/Dialect/CKKS/IR/PolyTypeInterface.td"
 
 def CKKS_Dialect : Dialect {
@@ -40,7 +41,9 @@ class CKKS_Op<string mnemonic, list<Trait> traits = []> :
 
 // Constants are kept as real MLIR attributes. The legacy integer .cst index is
 // intentionally not part of the RuntimePlan path.
-def EncodeOp : CKKS_Op<"encode"> {
+// Payload and result type fully determine the encoded plaintext before
+// placement. Sharing it is safe; transfers and Release are introduced later.
+def EncodeOp : CKKS_Op<"encode", [Pure]> {
   let arguments = (ins AnyAttr:$payload);
   let hasVerifier = 1;
 }

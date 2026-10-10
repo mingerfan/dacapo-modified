@@ -87,6 +87,10 @@ public:
   bool used() const { return !blobs.empty(); }
 
   FailureOr<Json> externalize(DenseElementsAttr dense, Operation *op) {
+    // Dense attributes are immutable and shared within the MLIR context.
+    // Repeated Encode operations can reuse the already validated blob.
+    if (auto it = exported.find(dense); it != exported.end())
+      return Json{{"kind", "bundle"}, {"content", it->second}};
     if (!dense.getElementType().isa<FloatType>()) {
       op->emitError(
           "RuntimePlan bundle externalization requires a float payload");
@@ -132,6 +136,7 @@ public:
       op->emitError("RuntimePlan bundle SHA-256 collision");
       return failure();
     }
+    exported.try_emplace(dense, content);
     return Json{{"kind", "bundle"}, {"content", content}};
   }
 
@@ -156,6 +161,7 @@ private:
   std::filesystem::path directory;
   std::string id;
   std::map<std::string, uint64_t> blobs;
+  llvm::DenseMap<Attribute, std::string> exported;
 };
 
 FailureOr<Json> encodePayload(Attribute payload, Operation *op,

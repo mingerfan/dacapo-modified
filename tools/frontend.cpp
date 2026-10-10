@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 
+#include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Parser/Parser.h"
@@ -130,14 +131,30 @@ char *save(Context *c, char *const_name, char *mlir_name) {
   pm.addNestedPass<func::FuncOp>(earth::createPrivatizeConstant());
   pm.addPass(createCanonicalizerPass());
 
-  auto ret = pm.run(*c->mod);
+  if (failed(pm.run(*c->mod)))
+    return nullptr;
 
   std::error_code EC;
   llvm::raw_fd_ostream outputFile(mlir_name, EC);
-  c->mod->print(outputFile, mlir::OpPrintingFlags()
-                                .printGenericOpForm()
-                                .enableDebugInfo()
-                                .useLocalScope());
+  if (EC) {
+    llvm::errs() << "Cannot open frontend output: " << EC.message() << '\n';
+    return nullptr;
+  }
+  if (llvm::StringRef(mlir_name).ends_with(".mlirbc")) {
+    if (failed(mlir::writeBytecodeToFile(c->mod->getOperation(), outputFile)))
+      return nullptr;
+  } else {
+    c->mod->print(outputFile, mlir::OpPrintingFlags()
+                                  .printGenericOpForm()
+                                  .enableDebugInfo()
+                                  .useLocalScope());
+  }
+  outputFile.flush();
+  if (outputFile.has_error()) {
+    llvm::errs() << "Cannot write frontend output: " << outputFile.error().message()
+                 << '\n';
+    return nullptr;
+  }
   c->valueMap.clear();
   c->funcMap.clear();
   c->mod.release();

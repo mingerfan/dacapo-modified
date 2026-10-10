@@ -1,7 +1,6 @@
 import ctypes
 import weakref
 import re
-import inspect
 from subprocess import Popen
 from collections.abc import Iterable
 import torch
@@ -89,7 +88,7 @@ toInnerUnary = {
 
 
 
-def save(dirs="", cst_dirs=""):
+def save(dirs="", cst_dirs="", *, bytecode=False):
     (frame, filename, line_number, function_name, lines,
             index) = getProperFrame()
 
@@ -102,9 +101,13 @@ def save(dirs="", cst_dirs=""):
     
     [func.eval() for func in funcList]
     name = filename.split("/")[-1].split(".")[0].encode('utf-8')
-    name = (dirs +"/"+ filename.split("/")[-1].split(".")[0]+ ".mlir" ).encode('utf-8') 
+    extension = ".mlirbc" if bytecode else ".mlir"
+    name = (dirs +"/"+ filename.split("/")[-1].split(".")[0]+ extension ).encode('utf-8')
     cst_name = (cst_dirs).encode('utf-8') 
-    name = lt.save(ctxt, cst_name, name ).decode('utf-8')
+    result = lt.save(ctxt, cst_name, name)
+    if result is None:
+        raise RuntimeError("Hecate frontend export failed: " + name.decode('utf-8'))
+    name = result.decode('utf-8')
 
 
     return name 
@@ -115,7 +118,7 @@ def save(dirs="", cst_dirs=""):
 def unaryFactory(name, opcode):
     def unaryMethod(self):
         (frame, filename, line_number, function_name, lines,
-                index) = inspect.stack()[1]
+                index) = getCallerFrame()
         if isinstance(self, Iterable):
             for tt in self : 
                 tt = Expr(
@@ -149,7 +152,7 @@ class hecateMetaBinary(hecateMetaBase):
         def binaryFactory(cls, name, opcode):
             def binaryMethod(self, other):
                 (frame, filename, line_number, function_name, lines,
-                        index) = inspect.stack()[1]
+                        index) = getCallerFrame()
                 tmp = resolveType(other)
                 return Expr(
                         lt.createBinary(ctxt, opcode, self.obj, tmp.obj,
@@ -157,7 +160,7 @@ class hecateMetaBinary(hecateMetaBase):
 
             def binaryReverseMethod(self, other):
                 (frame, filename, line_number, function_name, lines,
-                        index) = inspect.stack()[1]
+                        index) = getCallerFrame()
                 tmp = resolveType(other)
                 return Expr(
                         lt.createBinary(ctxt, opcode, tmp.obj, self.obj,
@@ -165,7 +168,7 @@ class hecateMetaBinary(hecateMetaBase):
 
             def binaryInplaceMethod(self, other):
                 (frame, filename, line_number, function_name, lines,
-                        index) = inspect.stack()[1]
+                        index) = getCallerFrame()
                 tmp = resolveType(other)
                 self.obj = lt.createBinary(ctxt, opcode, self.obj, tmp.obj,
                         filename.encode('utf-8'),
@@ -179,7 +182,7 @@ class hecateMetaBinary(hecateMetaBase):
         def innerFactory(cls, name, opcode):
             def innerMethod(self):
                 (frame, filename, line_number, function_name, lines,
-                        index) = inspect.stack()[1]
+                        index) = getCallerFrame()
                 return Expr(
                         lt.createUnary(ctxt, opcode, self.obj,
                             filename.encode('utf-8'), line_number))
@@ -197,7 +200,7 @@ class hecateMetaBinary(hecateMetaBase):
 
         def rotate(self, offset) :
             (frame, filename, line_number, function_name, lines,
-                        index) = inspect.stack()[1]
+                        index) = getCallerFrame()
             return Expr(lt.createRotation(ctxt, self.obj, offset, 
                 filename.encode('utf-8'), line_number))
         setattr(newcls, "rotate", rotate)
@@ -205,13 +208,23 @@ class hecateMetaBinary(hecateMetaBase):
 
 """Helper Functions"""
 
+def _frameInfo(frame):
+    return (frame, frame.f_code.co_filename, frame.f_lineno,
+            frame.f_code.co_name, None, None)
+
+
+def getCallerFrame():
+    return _frameInfo(sys._getframe(2))
+
+
 def getProperFrame():
-    (frame, thisname, line_number, function_name, lines,
-            index) = inspect.stack()[0]
-    for (frame, filename, line_number, function_name, lines,
-            index) in inspect.stack():
-        if thisname != filename:
-            return (frame, filename, line_number, function_name, lines, index)
+    thisname = sys._getframe().f_code.co_filename
+    frame = sys._getframe(1)
+    while frame is not None and frame.f_code.co_filename == thisname:
+        frame = frame.f_back
+    if frame is None:
+        raise RuntimeError("Cannot find the frontend caller's source location")
+    return _frameInfo(frame)
 
 def recType(li):
     if isinstance(li, int) or isinstance(li, float):

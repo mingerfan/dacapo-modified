@@ -68,6 +68,11 @@ struct PlanRuntimeMemoryPass
     for (const auto &[id, value] : layout->values)
       if (auto *producer = value.getDefiningOp())
         producer->setAttr("runtime.value_id", builder.getI64IntegerAttr(id));
+    // Build each last-use bucket once, preserving ascending ValueId order.
+    llvm::DenseMap<Operation *, SmallVector<Value>> releases;
+    for (const auto &[id, value] : layout->values)
+      if (!returned.count(value) && !overwritten.count(value))
+        releases[lastUse.lookup(value)].push_back(value);
     for (const auto &instruction : layout->instructions)
       instruction.operation->moveBefore(terminator);
     for (const auto &instruction : layout->instructions) {
@@ -77,10 +82,10 @@ struct PlanRuntimeMemoryPass
           ckks::canReuseRuntimeInput(operation, func))
         operation->setAttr("runtime.reuse_input", builder.getI64IntegerAttr(0));
       builder.setInsertionPointAfter(operation);
-      for (const auto &[id, value] : layout->values) {
-        if (returned.count(value) || overwritten.count(value) ||
-            lastUse.lookup(value) != operation)
-          continue;
+      auto found = releases.find(operation);
+      if (found == releases.end())
+        continue;
+      for (Value value : found->second) {
         OperationState state(operation->getLoc(),
                              dist::ReleaseOp::getOperationName());
         state.addOperands(value);

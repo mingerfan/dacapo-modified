@@ -33,10 +33,12 @@ uint64_t multiply(uint64_t a, uint64_t b) {
 struct Block {
   uint64_t valueId, bytes;
   ckks::RuntimePlace place;
-  bool plaintext, external, live = true;
+  bool plaintext, external;
+  uint64_t born, retired = std::numeric_limits<uint64_t>::max();
 };
 struct PlaceStats {
   uint64_t plaintext = 0, ciphertext = 0, peak = 0, allocated = 0;
+  uint64_t peakEventIndex = 0;
   Json peakEvent;
 };
 struct EstimateRuntimeMemoryPass
@@ -67,6 +69,7 @@ struct EstimateRuntimeMemoryPass
             "OperatorSpec poly_degree must be a positive integer");
       const uint64_t degree = degreeJson.get<uint64_t>();
       std::vector<Block> blocks;
+      uint64_t eventIndex = 0;
       std::map<uint64_t, size_t> aliases;
       std::map<ckks::RuntimePlace, PlaceStats> places;
       if (auto counts =
@@ -95,7 +98,7 @@ struct EstimateRuntimeMemoryPass
           throw std::runtime_error("value allocated twice");
         aliases.emplace(id, blocks.size());
         blocks.push_back(
-            {id, bytes, *place, type.getComponents() == 1, external});
+            {id, bytes, *place, type.getComponents() == 1, external, eventIndex});
         auto &stats = places[*place];
         (type.getComponents() == 1 ? stats.plaintext : stats.ciphertext) =
             add(type.getComponents() == 1 ? stats.plaintext : stats.ciphertext,
@@ -109,30 +112,12 @@ struct EstimateRuntimeMemoryPass
           if (current <= stats.peak && !stats.peakEvent.is_null())
             continue;
           stats.peak = current;
-          std::vector<const Block *> largest;
-          for (const Block &block : blocks)
-            if (block.live && block.place == place)
-              largest.push_back(&block);
-          std::sort(largest.begin(), largest.end(),
-                    [](const Block *a, const Block *b) {
-                      return a->bytes != b->bytes ? a->bytes > b->bytes
-                                                  : a->valueId < b->valueId;
-                    });
-          Json objects = Json::array();
-          for (size_t i = 0; i < std::min<size_t>(5, largest.size()); ++i) {
-            const Block &block = *largest[i];
-            objects.push_back(
-                {{"value_id", std::to_string(block.valueId)},
-                 {"bytes", block.bytes},
-                 {"kind", block.plaintext ? "plaintext" : "ciphertext"},
-                 {"external", block.external}});
-          }
+          stats.peakEventIndex = eventIndex;
           stats.peakEvent = {{"phase", phase},
                              {"instruction_ordinal", ordinal},
                              {"operation", operation},
                              {"plaintext_bytes", stats.plaintext},
-                             {"ciphertext_bytes", stats.ciphertext},
-                             {"largest_objects", std::move(objects)}};
+                             {"ciphertext_bytes", stats.ciphertext}};
         }
       };
       for (Value argument : func.getArguments())
@@ -143,6 +128,7 @@ struct EstimateRuntimeMemoryPass
       if (!returnOp)
         throw std::runtime_error("memory estimation requires func.return");
       for (const auto &instruction : layout->instructions) {
+        ++eventIndex;
         Operation *op = instruction.operation;
         if (auto release = dyn_cast<dist::ReleaseOp>(op)) {
           auto id = layout->ids.lookup(release.getInput());
@@ -158,7 +144,7 @@ struct EstimateRuntimeMemoryPass
             auto &stats = places[block.place];
             (block.plaintext ? stats.plaintext : stats.ciphertext) -=
                 block.bytes;
-            block.live = false;
+            block.retired = eventIndex;
           }
           aliases.erase(alias);
         } else {
@@ -176,9 +162,16 @@ struct EstimateRuntimeMemoryPass
             auto oldId = layout->ids.lookup(op->getOperand(0)),
                  newId = layout->ids.lookup(op->getResult(0));
             auto index = aliases.at(oldId);
+            // Record alias lifetimes so a later reuse does not rewrite the
+            // ValueId reported for an earlier peak. The allocation is shared.
+            Block replacement = blocks[index];
+            blocks[index].retired = eventIndex;
+            replacement.valueId = newId;
+            replacement.born = eventIndex;
+            replacement.retired = std::numeric_limits<uint64_t>::max();
             aliases.erase(oldId);
-            aliases.emplace(newId, index);
-            blocks[index].valueId = newId;
+            aliases.emplace(newId, blocks.size());
+            blocks.push_back(replacement);
           } else
             allocate(op->getResult(0), false);
         }
@@ -189,7 +182,33 @@ struct EstimateRuntimeMemoryPass
         if (!aliases.count(layout->ids.lookup(output)))
           throw std::runtime_error("final output is undefined or retired");
       Json rows = Json::array();
-      for (const auto &[place, stats] : places) {
+      for (auto &[place, stats] : places) {
+        // Reconstruct only the final peak, rather than scanning and sorting
+        // every live object whenever the running peak rises.
+        std::vector<const Block *> largest;
+        for (const Block &block : blocks) {
+          if (!(block.place == place) || block.born > stats.peakEventIndex ||
+              block.retired <= stats.peakEventIndex)
+            continue;
+          auto position = std::lower_bound(
+              largest.begin(), largest.end(), &block,
+              [](const Block *a, const Block *b) {
+                return a->bytes != b->bytes ? a->bytes > b->bytes
+                                            : a->valueId < b->valueId;
+              });
+          largest.insert(position, &block);
+          if (largest.size() > 5)
+            largest.pop_back();
+        }
+        if (!stats.peakEvent.is_null()) {
+          Json objects = Json::array();
+          for (const Block *block : largest)
+            objects.push_back({{"value_id", std::to_string(block->valueId)},
+                               {"bytes", block->bytes},
+                               {"kind", block->plaintext ? "plaintext" : "ciphertext"},
+                               {"external", block->external}});
+          stats.peakEvent["largest_objects"] = std::move(objects);
+        }
         Json location = {{"kind", place.device < 0 ? "host" : "device"},
                          {"rank", place.rank}};
         if (place.device >= 0)
