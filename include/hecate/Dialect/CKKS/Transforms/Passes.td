@@ -41,6 +41,8 @@ def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
     Option<"inlinePayloadMaxBytes", "inline-payload-max-bytes", "int64_t",
            /*default=*/[{4096}],
            "Largest Encode payload kept inline; larger float64 payloads use a bundle">,
+    Option<"bundleFormat", "bundle-format", "std::string", /*default=*/[{"pack"}],
+           "Plaintext bundle storage: pack (one data.bin) or files">,
     Option<"pretty", "pretty", "bool", /*default=*/[{false}],
            "Indent RuntimePlan JSON for diagnostics (default: compact)">,
     Option<"reportIo", "report-io", "bool", /*default=*/[{false}],

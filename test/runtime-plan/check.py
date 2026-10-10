@@ -66,9 +66,13 @@ def load_bundle(plan: dict, directory: Path) -> tuple[dict, dict[str, bytes]]:
     assert manifest["bundle_id"] == plan["plaintext_bundle"]["id"]
     assert manifest["version"] == plan["plaintext_bundle"]["version"]
     blobs = {}
+    packed = (directory / "data.bin").read_bytes() if manifest["bundle_format_version"] == 2 else None
+    if packed is not None:
+        assert len(packed) == manifest["pack_byte_length"]
     for entry in manifest["blobs"]:
         content = entry["content"]
-        data = (directory / "data" / f"{content[7:]}.bin").read_bytes()
+        data = (packed[entry["offset"]:entry["offset"] + entry["byte_length"]] if packed is not None
+                else (directory / "data" / f"{content[7:]}.bin").read_bytes())
         assert len(data) == entry["byte_length"]
         assert content == "sha256:" + hashlib.sha256(data).hexdigest()
         blobs[content] = data

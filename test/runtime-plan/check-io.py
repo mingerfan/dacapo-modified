@@ -23,18 +23,19 @@ def main():
                        cwd=args.source_dir, check=True)
         prefix = temp / "out"
 
-        def emit(pretty):
-            options = (f"prefix={prefix} target-id=test operator-spec-id=test "
+        def emit(pretty, storage="files"):
+            artifact_prefix = prefix if storage == "files" else temp / "packed"
+            options = (f"prefix={artifact_prefix} bundle-format={storage} target-id=test operator-spec-id=test "
                        f"operator-spec-sha256=sha256:{'0' * 64} context-id=test-context "
                        f"pretty={'true' if pretty else 'false'} report-io=true")
             result = subprocess.run([str(args.hecate_opt), str(ir),
                                      f"-p=builtin.module(func.func(emit-runtime-plan{{{options}}}))",
                                      "-o", "/dev/null"], cwd=args.source_dir,
                                     check=True, capture_output=True, text=True)
-            path = Path(f"{prefix}.bundle_reuse.runtime-plan.json")
+            path = Path(f"{artifact_prefix}.bundle_reuse.runtime-plan.json")
             raw = path.read_bytes()
             plan = json.loads(raw)
-            manifest = Path(f"{prefix}.bundle_reuse.bundle/manifest.json").read_bytes()
+            manifest = Path(f"{artifact_prefix}.bundle_reuse.bundle/manifest.json").read_bytes()
             assert plan["plaintext_bundle"]["manifest_sha256"] == "sha256:" + hashlib.sha256(manifest).hexdigest()
             report = json.loads(next(line.removeprefix("runtime-plan-io ")
                                      for line in result.stderr.splitlines() if line.startswith("runtime-plan-io ")))
@@ -53,12 +54,36 @@ def main():
         assert len(compact_bytes) < len(diagnostic_bytes)
         assert compact_bytes.count(b"\n") == 1
         assert emit(False)[1] == compact_bytes
+        packed_plan, packed_bytes = emit(False, "pack")
+        packed_dir = Path(f"{temp / 'packed'}.bundle_reuse.bundle")
+        packed_manifest = json.loads((packed_dir / "manifest.json").read_bytes())
+        assert packed_manifest["bundle_format_version"] == 2
+        assert packed_manifest["pack_byte_length"] == 4800
+        assert packed_manifest["blobs"][0]["offset"] == 0
+        assert sorted(p.name for p in packed_dir.iterdir()) == ["data.bin", "manifest.json"]
+        assert (packed_dir / "data.bin").read_bytes() == next(Path(f"{prefix}.bundle_reuse.bundle/data").glob("*.bin")).read_bytes()
+        expected_plan = dict(compact)
+        expected_plan["plaintext_bundle"] = packed_plan["plaintext_bundle"]
+        assert packed_plan == expected_plan
+        assert emit(False, "pack")[1] == packed_bytes
+        packed_output = Path(f"{temp / 'packed'}.bundle_reuse.runtime-plan.json")
+        packed_data = packed_dir / "data.bin"
+        original_pack = packed_data.read_bytes()
+        packed_data.write_bytes(bytes([original_pack[0] ^ 1]) + original_pack[1:])
+        try:
+            emit(False, "pack")
+            raise AssertionError("corrupt published pack was accepted")
+        except subprocess.CalledProcessError as error:
+            assert "existing bundle pack bytes mismatch" in error.stderr
+        assert packed_output.read_bytes() == packed_bytes
+        assert not list(temp.rglob("*.tmp"))
+        packed_data.write_bytes(original_pack)
         # A failed publication must preserve the existing entry point.
         output = Path(f"{prefix}.bundle_reuse.runtime-plan.json")
         temporary = Path(str(output) + ".tmp")
         temporary.mkdir()
         result = subprocess.run([str(args.hecate_opt), str(ir),
-                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context}}))",
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=files}}))",
                                  "-o", "/dev/null"], cwd=args.source_dir,
                                 capture_output=True, text=True)
         assert result.returncode != 0 and "cannot open output file" in result.stderr
@@ -70,7 +95,7 @@ def main():
         original_blob = blob.read_bytes()
         blob.write_bytes(bytes([original_blob[0] ^ 1]) + original_blob[1:])
         result = subprocess.run([str(args.hecate_opt), str(ir),
-                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context}}))",
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=files}}))",
                                  "-o", "/dev/null"], cwd=args.source_dir,
                                 capture_output=True, text=True)
         assert result.returncode != 0 and "existing bundle blob SHA-256 mismatch" in result.stderr
@@ -86,7 +111,13 @@ def main():
         bad.write_text(text[:index] + text[index:].replace('"ckks.encode"', '"test.unsupported"', 1))
         bad_prefix = temp / "failed"
         result = subprocess.run([str(args.hecate_opt), str(bad), "--allow-unregistered-dialect",
-                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={bad_prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context}}))",
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={bad_prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=files}}))",
+                                 "-o", "/dev/null"], cwd=args.source_dir,
+                                capture_output=True, text=True)
+        assert result.returncode != 0 and "unsupported operation" in result.stderr
+        assert not list(temp.glob("failed.*"))
+        result = subprocess.run([str(args.hecate_opt), str(bad), "--allow-unregistered-dialect",
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={bad_prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=pack}}))",
                                  "-o", "/dev/null"], cwd=args.source_dir,
                                 capture_output=True, text=True)
         assert result.returncode != 0 and "unsupported operation" in result.stderr

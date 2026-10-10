@@ -102,6 +102,11 @@ For diagnostic MLIR output, `--mlir-elide-elementsattrs-if-larger=16` reduces
 disk use. That printed MLIR cannot be recompiled because constants are elided;
 RuntimePlan JSON and its plaintext bundle still contain the complete payloads.
 
+Plaintext bundles default to storage V2: one `data.bin` with byte offsets in
+`manifest.json`. Use `--runtime-plan-bundle-format=files` (or the export pass
+option `bundle-format=files`) for the legacy per-blob layout. This storage version
+is independent of RuntimePlan V1/V2/V3; older readers require the legacy layout.
+
 For large native traces, `hc.save(directory, directory, bytecode=True)` writes
 lossless `.mlirbc` bytecode, which `hecate-opt` reads directly. Constants are
 retained; no external serialization dependency is needed. Frontend source

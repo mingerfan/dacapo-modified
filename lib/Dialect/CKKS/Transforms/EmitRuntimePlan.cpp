@@ -314,12 +314,14 @@ private:
 class PlaintextBundleWriter {
 public:
   PlaintextBundleWriter(std::filesystem::path directory, std::string id,
-                        bool profile)
+                        bool profile, bool packed)
       : directory(std::move(directory)),
         staging(this->directory.string() + ".tmp"), id(std::move(id)),
-        profile(profile) {}
+        profile(profile), packed(packed) {}
 
   ~PlaintextBundleWriter() {
+    if (pack.is_open())
+      pack.close();
     if (stagingOwned) {
       std::error_code ignored;
       std::filesystem::remove_all(staging, ignored);
@@ -333,7 +335,11 @@ public:
              << staging.string() << ": "
              << (error ? error.message() : "already exists");
     stagingOwned = true;
-    if (!std::filesystem::create_directory(staging / "data", error))
+    if (packed) {
+      pack.open(staging / "data.bin", std::ios::binary | std::ios::trunc);
+      if (!pack)
+        return op->emitError("cannot open RuntimePlan bundle pack");
+    } else if (!std::filesystem::create_directory(staging / "data", error))
       return op->emitError("cannot create RuntimePlan bundle data directory: ")
              << error.message();
     return success();
@@ -344,6 +350,7 @@ public:
             {"constant_hash_seconds", hashSeconds},
             {"constant_write_seconds", writeSeconds},
             {"bundle_bytes", blobBytes},
+            {"bundle_format_version", packed ? 2 : 1},
             {"unique_blobs", blobs.size()},
             {"duplicate_hits", duplicateHits},
             {"manifest_bytes", manifestBytes},
@@ -394,17 +401,29 @@ public:
     const std::string content = sha256(bytes);
     if (profile)
       hashSeconds += elapsed(hashStart);
-    const auto [it, inserted] = blobs.emplace(content, bytes.size());
+    const auto [it, inserted] = blobs.emplace(
+        content, Blob{static_cast<uint64_t>(bytes.size()), blobBytes});
     if (inserted) {
-      const std::filesystem::path blobPath =
-          staging / "data" / (content.substr(7) + ".bin");
       const auto writeStart = profile ? Clock::now() : Clock::time_point{};
-      if (failed(writeFile(blobPath, bytes, op)))
+      if (blobBytes > maxBundleBytes - bytes.size()) {
+        op->emitError("RuntimePlan bundle pack byte length is out of range");
         return failure();
+      }
+      if (packed) {
+        pack.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (!pack) {
+          op->emitError("failed to write RuntimePlan bundle pack");
+          return failure();
+        }
+      } else {
+        const auto blobPath = staging / "data" / (content.substr(7) + ".bin");
+        if (failed(writeFile(blobPath, bytes, op)))
+          return failure();
+      }
       if (profile)
         writeSeconds += elapsed(writeStart);
       blobBytes += bytes.size();
-    } else if (it->second != bytes.size()) {
+    } else if (it->second.length != bytes.size()) {
       op->emitError("RuntimePlan bundle SHA-256 collision");
       return failure();
     }
@@ -416,16 +435,32 @@ public:
 
   FailureOr<Json> writeManifest(Operation *op) {
     const auto start = profile ? Clock::now() : Clock::time_point{};
+    if (packed) {
+      const auto writeStart = profile ? Clock::now() : Clock::time_point{};
+      pack.close();
+      if (profile)
+        writeSeconds += elapsed(writeStart);
+      if (!pack) {
+        op->emitError("failed to close RuntimePlan bundle pack");
+        return failure();
+      }
+    }
     JsonArtifact artifact(staging / "manifest.json", profile);
     if (failed(artifact.checkOpen(op)))
       return failure();
     JsonStreamWriter writer(artifact.output, false, profile);
-    writer.field("bundle_format_version", 1);
+    writer.field("bundle_format_version", packed ? 2 : 1);
     writer.field("bundle_id", id);
     writer.field("version", 1);
+    if (packed)
+      writer.field("pack_byte_length", blobBytes);
     writer.beginArray("blobs");
-    for (const auto &[content, byteLength] : blobs)
-      writer.record({{"content", content}, {"byte_length", byteLength}});
+    for (const auto &[content, blob] : blobs) {
+      Json entry{{"content", content}, {"byte_length", blob.length}};
+      if (packed)
+        entry["offset"] = blob.offset;
+      writer.record(entry);
+    }
     writer.endArray();
     writer.finish();
     if (failed(artifact.finish(op)) || failed(artifact.publish(op)))
@@ -456,19 +491,42 @@ public:
       if (*existingDigest != manifestDigest)
         return op->emitError("existing plaintext bundle has a different "
                              "manifest; use a new prefix");
-      for (const auto &[content, length] : blobs) {
-        const auto path = directory / "data" / (content.substr(7) + ".bin");
+      if (packed) {
+        const auto path = directory / "data.bin";
         const auto size = std::filesystem::file_size(path, error);
-        if (error || size != length)
-          return op->emitError("existing bundle blob byte length mismatch: ")
-                 << path.string();
-        auto digest = fileDigest(path, op);
-        if (failed(digest))
-          return failure();
-        if (*digest != content)
-          return op->emitError("existing bundle blob SHA-256 mismatch: ")
-                 << path.string();
-      }
+        if (error || size != blobBytes)
+          return op->emitError("existing bundle pack byte length mismatch");
+        // Compare the published pack with the newly emitted bytes once, using
+        // bounded buffers. Content IDs were computed during emission.
+        std::ifstream oldPack(path, std::ios::binary),
+            newPack(staging / "data.bin", std::ios::binary);
+        if (!oldPack || !newPack)
+          return op->emitError("cannot open existing bundle pack");
+        std::array<char, 64 * 1024> left, right;
+        for (uint64_t position = 0; position < blobBytes;) {
+          const auto count =
+              std::min<uint64_t>(left.size(), blobBytes - position);
+          oldPack.read(left.data(), count);
+          newPack.read(right.data(), count);
+          if (!oldPack || !newPack ||
+              std::memcmp(left.data(), right.data(), count))
+            return op->emitError("existing bundle pack bytes mismatch");
+          position += count;
+        }
+      } else
+        for (const auto &[content, blob] : blobs) {
+          const auto path = directory / "data" / (content.substr(7) + ".bin");
+          const auto size = std::filesystem::file_size(path, error);
+          if (error || size != blob.length)
+            return op->emitError("existing bundle blob byte length mismatch: ")
+                   << path.string();
+          auto digest = fileDigest(path, op);
+          if (failed(digest))
+            return failure();
+          if (*digest != content)
+            return op->emitError("existing bundle blob SHA-256 mismatch: ")
+                   << path.string();
+        }
       if (profile)
         reuseSeconds = elapsed(start);
       return success();
@@ -509,11 +567,15 @@ private:
   }
   std::filesystem::path directory, staging;
   std::string id, manifestDigest;
-  bool profile, stagingOwned = false, publishedNew = false;
+  bool profile, packed, stagingOwned = false, publishedNew = false;
+  std::ofstream pack;
+  struct Blob {
+    uint64_t length, offset;
+  };
   double conversionSeconds = 0, hashSeconds = 0, writeSeconds = 0,
          manifestSeconds = 0, reuseSeconds = 0;
   uint64_t blobBytes = 0, manifestBytes = 0, duplicateHits = 0;
-  std::map<std::string, uint64_t> blobs;
+  std::map<std::string, Blob> blobs;
   llvm::DenseMap<Attribute, std::string> exported;
 };
 
@@ -905,6 +967,11 @@ struct EmitRuntimePlanPass
       return;
     }
 
+    if (bundleFormat != "pack" && bundleFormat != "files") {
+      func.emitError("bundle-format must be pack or files");
+      signalPassFailure();
+      return;
+    }
     Json emittedDeviceCounts = Json::array();
     int64_t worldSize = 1;
     if (auto placedCounts =
@@ -946,7 +1013,7 @@ struct EmitRuntimePlanPass
     PlaintextBundleWriter bundle(artifactStem + ".bundle",
                                  "runtime-plan-" + planId.getValue() + "-" +
                                      func.getName().str() + "-plaintexts",
-                                 reportIo.getValue());
+                                 reportIo.getValue(), bundleFormat == "pack");
     if (failed(bundle.initialize(func))) {
       signalPassFailure();
       return;
