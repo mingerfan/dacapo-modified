@@ -32,4 +32,9 @@ def ReleaseOp : Dist_Op<"release", [MemoryEffects<[MemFree]>]> {
   let hasVerifier = 1;
 }
 
+// A scheduling boundary has observable ordering effects even without SSA values.
+def FenceOp : Dist_Op<"fence", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Complete this local runtime batch before submitting the next";
+}
+
 #endif

@@ -10,7 +10,7 @@ namespace hecate::ckks {
 
 bool isRuntimeInitialization(Operation *operation) {
   if (isa<EncodeOp>(operation))
-    return true;
+    return !operation->hasAttr("runtime.streaming");
   if (auto transfer = dyn_cast<dist::TransferOp>(operation))
     return transfer.getInitialization();
   if (auto release = dyn_cast<dist::ReleaseOp>(operation))
@@ -112,7 +112,7 @@ FailureOr<RuntimePlanLayout> buildRuntimePlanLayout(func::FuncOp func) {
     for (Operation &operation : func.getBody().front()) {
       if (isa<func::ReturnOp>(operation))
         continue;
-      if (!isa<dist::ReleaseOp>(operation) && operation.getNumResults() != 1) {
+      if (!isa<dist::ReleaseOp, dist::FenceOp>(operation) && operation.getNumResults() != 1) {
         operation.emitError("unsupported RuntimePlan operation");
         return failure();
       }

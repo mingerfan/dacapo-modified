@@ -244,6 +244,10 @@ struct RuntimePlanBuilder {
 
     for (const auto &scheduled : instructions) {
       Operation &op = *scheduled.operation;
+      if (isa<dist::FenceOp>(op)) {
+        execution.push_back({{"kind", "fence"}});
+        continue;
+      }
       if (auto release = dyn_cast<dist::ReleaseOp>(op)) {
         auto id = valueId(release.getInput(), &op);
         if (failed(id)) return failure();
@@ -265,7 +269,7 @@ struct RuntimePlanBuilder {
             encode.getPayload(), &op, bundle, inlinePayloadMaxBytes);
         if (failed(payload))
           return failure();
-        initialization.push_back({{"kind", "encode"},
+        (scheduled.initialization ? initialization : execution).push_back({{"kind", "encode"},
                                   {"payload", std::move(*payload)},
                                   {"output", std::to_string(outputId)}});
         continue;
@@ -585,7 +589,7 @@ struct EmitRuntimePlanPass
     func.walk([&](Operation *op) {
       version2 |= isa<dist::ReleaseOp>(op) || op->hasAttr("runtime.reuse_input");
     });
-    Json plan = {{"format_version", version2 ? 2 : 1},
+    Json plan = {{"format_version", func->hasAttr("runtime.streaming") ? 3 : (version2 ? 2 : 1)},
                  {"plan_id", planId.getValue()},
                  {"target",
                   {{"target_id", targetId.getValue()},

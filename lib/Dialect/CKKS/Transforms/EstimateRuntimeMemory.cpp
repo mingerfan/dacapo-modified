@@ -147,6 +147,8 @@ struct EstimateRuntimeMemoryPass
             block.retired = eventIndex;
           }
           aliases.erase(alias);
+        } else if (isa<dist::FenceOp>(op)) {
+          // Batch bounds are reported separately by PlanPlaintextStreaming.
         } else {
           for (Value operand : op->getOperands())
             if (!aliases.count(layout->ids.lookup(operand)))

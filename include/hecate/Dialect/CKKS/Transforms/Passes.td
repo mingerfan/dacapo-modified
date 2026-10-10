@@ -98,6 +98,21 @@ def MaterializeCommunication : Pass<"materialize-ckks-communication",
   }];
 }
 
+def PlanPlaintextStreaming : Pass<"plan-plaintext-streaming", "::mlir::func::FuncOp"> {
+  let dependentDialects = ["hecate::dist::DistDialect"];
+  let summary = "Schedule bounded local plaintext batches with Fence";
+  let options = [
+    Option<"operatorSpecPath", "operator-spec", "std::string", [{""}], "Physical OperatorSpec JSON">,
+    Option<"prefix", "prefix", "std::string", [{""}], "Report filename prefix">,
+    Option<"gpuBudget", "gpu-budget-bytes", "uint64_t", [{0}], "Per-GPU RNS object budget after reserves">,
+    Option<"hostBudget", "host-budget-bytes", "uint64_t", [{0}], "Host RNS object budget">,
+    Option<"pinnedBudget", "pinned-budget-bytes", "uint64_t", [{0}], "Batch upload staging budget">,
+    Option<"rawBudget", "raw-budget-bytes", "uint64_t", [{0}], "One raw read plus decoded slots budget">,
+    Option<"workspaceBytes", "workspace-bytes-per-op", "uint64_t", [{0}], "Additional cumulative per-GPU compute reservation">,
+    Option<"prefetchBytes", "prefetch-bytes", "uint64_t", [{0}], "Move batch preparations ahead of compute, bounded by encoded bytes">
+  ];
+}
+
 def PlanRuntimeMemory : Pass<"plan-runtime-memory", "::mlir::func::FuncOp"> {
   let dependentDialects = ["hecate::dist::DistDialect"];
   let summary = "Mark safe input reuse and release values after their last runtime use";
