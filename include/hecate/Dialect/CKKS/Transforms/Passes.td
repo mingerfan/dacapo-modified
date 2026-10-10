@@ -40,7 +40,11 @@ def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
            "Boot implementation: native or decrypt_reencrypt">,
     Option<"inlinePayloadMaxBytes", "inline-payload-max-bytes", "int64_t",
            /*default=*/[{4096}],
-           "Largest Encode payload kept inline; larger float64 payloads use a bundle">
+           "Largest Encode payload kept inline; larger float64 payloads use a bundle">,
+    Option<"pretty", "pretty", "bool", /*default=*/[{false}],
+           "Indent RuntimePlan JSON for diagnostics (default: compact)">,
+    Option<"reportIo", "report-io", "bool", /*default=*/[{false}],
+           "Report RuntimePlan export timings and bytes to stderr">
   ];
 }
 

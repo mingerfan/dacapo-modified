@@ -10,13 +10,16 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/SHA256.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <string>
@@ -74,9 +77,39 @@ LogicalResult writeFile(const std::filesystem::path &path,
   if (!output)
     return op->emitError("cannot open output file: ") << path.string();
   output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  output.close();
   if (!output)
     return op->emitError("failed to write output file: ") << path.string();
   return success();
+}
+
+LogicalResult writeJsonFile(const std::filesystem::path &path,
+                            const Json &value, bool pretty, Operation *op) {
+  const std::filesystem::path temporary = path.string() + ".tmp";
+  std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+  if (!output)
+    return op->emitError("cannot open output file: ") << temporary.string();
+  output << std::setw(pretty ? 2 : 0) << value << '\n';
+  output.close();
+  if (!output) {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    return op->emitError("failed to write output file: ") << temporary.string();
+  }
+  std::error_code error;
+  std::filesystem::rename(temporary, path, error);
+  if (error) {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    return op->emitError("cannot publish output file: ")
+           << path.string() << ": " << error.message();
+  }
+  return success();
+}
+
+using Clock = std::chrono::steady_clock;
+double elapsed(Clock::time_point start) {
+  return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
 class PlaintextBundleWriter {
@@ -579,11 +612,13 @@ struct EmitRuntimePlanPass
                                bootImplementation.getValue(), bundle,
                                static_cast<uint64_t>(
                                    inlinePayloadMaxBytes.getValue()));
+    const auto buildStart = Clock::now();
     if (failed(builder.build(values, externalInputs, initialization, execution,
                              finalOutputs))) {
       signalPassFailure();
       return;
     }
+    const double buildSeconds = elapsed(buildStart);
 
     bool version2 = func->hasAttr("runtime.memory_planned");
     bool version3 = func->hasAttr("runtime.streaming");
@@ -609,6 +644,7 @@ struct EmitRuntimePlanPass
                  {"finalization", Json::array()},
                  {"final_outputs", std::move(finalOutputs)}};
 
+    const auto manifestStart = Clock::now();
     if (bundle.used()) {
       FailureOr<Json> reference = bundle.writeManifest(func);
       if (failed(reference)) {
@@ -617,13 +653,23 @@ struct EmitRuntimePlanPass
       }
       plan["plaintext_bundle"] = std::move(*reference);
     }
+    const double manifestSeconds = elapsed(manifestStart);
 
     const std::filesystem::path outputPath =
         artifactStem + ".runtime-plan.json";
-    const std::string planBytes = plan.dump(2) + '\n';
-    if (failed(writeFile(outputPath, planBytes, func))) {
+    const auto writeStart = Clock::now();
+    if (failed(writeJsonFile(outputPath, plan, pretty.getValue(), func))) {
       signalPassFailure();
       return;
+    }
+    if (reportIo) {
+      llvm::errs() << "runtime-plan-io "
+                   << Json{{"build_seconds", buildSeconds},
+                           {"manifest_seconds", manifestSeconds},
+                           {"plan_write_seconds", elapsed(writeStart)},
+                           {"plan_bytes", std::filesystem::file_size(outputPath)},
+                           {"pretty", pretty.getValue()}}.dump()
+                   << '\n';
     }
   }
 };
