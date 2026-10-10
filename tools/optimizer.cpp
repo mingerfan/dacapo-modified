@@ -311,6 +311,10 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       "runtime-plan-inline-payload-max-bytes",
       cl::desc("Largest RuntimePlan Encode payload kept inline"),
       cl::init(4096)};
+  static cl::opt<bool> runtime_plan_pretty{
+      "runtime-plan-pretty", cl::desc("Indent RuntimePlan JSON for diagnostics"), cl::init(false)};
+  static cl::opt<bool> runtime_plan_report_io{
+      "runtime-plan-report-io", cl::desc("Report RuntimePlan export timings and bytes"), cl::init(false)};
 
   static cl::opt<bool> runtime_plan_memory{
       "runtime-plan-memory", cl::desc("Plan Release and supported input reuse"), cl::init(false)};
@@ -403,6 +407,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
     options.bootProfile = runtime_plan_boot_profile;
     options.bootImplementation = runtime_plan_boot_implementation;
     options.inlinePayloadMaxBytes = runtime_plan_inline_payload_max_bytes;
+    options.pretty = runtime_plan_pretty;
+    options.reportIo = runtime_plan_report_io;
     pm.addNestedPass<func::FuncOp>(
         hecate::ckks::createEmitRuntimePlan(options));
   };

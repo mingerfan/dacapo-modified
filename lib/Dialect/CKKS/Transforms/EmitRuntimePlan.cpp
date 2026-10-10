@@ -13,16 +13,21 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
-#include <cmath>
+#include <array>
 #include <chrono>
-#include <cstring>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <map>
 #include <string>
+#ifdef __linux__
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 
 namespace hecate {
 namespace ckks {
@@ -83,53 +88,285 @@ LogicalResult writeFile(const std::filesystem::path &path,
   return success();
 }
 
-LogicalResult writeJsonFile(const std::filesystem::path &path,
-                            const Json &value, bool pretty, Operation *op) {
-  const std::filesystem::path temporary = path.string() + ".tmp";
-  std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-  if (!output)
-    return op->emitError("cannot open output file: ") << temporary.string();
-  output << std::setw(pretty ? 2 : 0) << value << '\n';
-  output.close();
-  if (!output) {
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
-    return op->emitError("failed to write output file: ") << temporary.string();
-  }
-  std::error_code error;
-  std::filesystem::rename(temporary, path, error);
-  if (error) {
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
-    return op->emitError("cannot publish output file: ")
-           << path.string() << ": " << error.message();
-  }
-  return success();
-}
-
 using Clock = std::chrono::steady_clock;
 double elapsed(Clock::time_point start) {
   return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
+uint64_t residentBytes() {
+#ifdef __linux__
+  std::ifstream status("/proc/self/statm");
+  uint64_t total = 0, resident = 0;
+  status >> total >> resident;
+  return resident * static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
+#else
+  return 0;
+#endif
+}
+uint64_t peakResidentBytes() {
+#ifdef __linux__
+  rusage usage{};
+  getrusage(RUSAGE_SELF, &usage);
+  return static_cast<uint64_t>(usage.ru_maxrss) * 1024;
+#else
+  return 0;
+#endif
+}
+
+// nlohmann's stream serializer writes small pieces. Buffer them before file
+// I/O and hashing, so each output byte enters the digest exactly once.
+class JsonFileBuffer : public std::streambuf {
+public:
+  JsonFileBuffer(const std::filesystem::path &path, bool profile)
+      : file(path, std::ios::binary | std::ios::trunc), profile(profile) {
+    setp(buffer.data(), buffer.data() + buffer.size());
+  }
+  bool isOpen() const { return file.is_open(); }
+  bool close() {
+    if (closed)
+      return good;
+    good = flush();
+    const auto start = profile ? Clock::now() : Clock::time_point{};
+    file.close();
+    if (profile)
+      writeSeconds += elapsed(start);
+    good &= !file.fail();
+    closed = true;
+    if (good) {
+      const auto digest = hash.final();
+      digestString =
+          "sha256:" + llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true);
+    }
+    return good;
+  }
+  uint64_t bytes = 0;
+  double writeSeconds = 0, hashSeconds = 0;
+  std::string digestString;
+
+private:
+  bool flush() {
+    const auto count = pptr() - pbase();
+    if (!count)
+      return !file.fail();
+    auto start = profile ? Clock::now() : Clock::time_point{};
+    file.write(pbase(), count);
+    if (profile)
+      writeSeconds += elapsed(start);
+    if (!file)
+      return false;
+    start = profile ? Clock::now() : Clock::time_point{};
+    hash.update(llvm::StringRef(pbase(), count));
+    if (profile)
+      hashSeconds += elapsed(start);
+    bytes += static_cast<uint64_t>(count);
+    setp(buffer.data(), buffer.data() + buffer.size());
+    return true;
+  }
+  int sync() override { return flush() ? 0 : -1; }
+  int_type overflow(int_type c) override {
+    if (!flush())
+      return traits_type::eof();
+    if (!traits_type::eq_int_type(c, traits_type::eof())) {
+      *pptr() = traits_type::to_char_type(c);
+      pbump(1);
+    }
+    return traits_type::not_eof(c);
+  }
+  std::streamsize xsputn(const char *data, std::streamsize count) override {
+    std::streamsize written = 0;
+    while (written < count) {
+      if (pptr() == epptr() && !flush())
+        break;
+      const auto size = std::min(count - written, epptr() - pptr());
+      std::memcpy(pptr(), data + written, static_cast<size_t>(size));
+      pbump(static_cast<int>(size));
+      written += size;
+    }
+    return written;
+  }
+  std::ofstream file;
+  std::array<char, 64 * 1024> buffer;
+  llvm::SHA256 hash;
+  bool profile, closed = false, good = true;
+};
+
+class JsonArtifact {
+private:
+  std::filesystem::path path, temporary;
+  bool opened = false, published = false;
+
+public:
+  JsonArtifact(std::filesystem::path path, bool profile)
+      : path(std::move(path)), temporary(this->path.string() + ".tmp"),
+        buffer(temporary, profile), output(&buffer) {}
+  ~JsonArtifact() {
+    buffer.close();
+    if (!published && opened) {
+      std::error_code ignored;
+      std::filesystem::remove(temporary, ignored);
+    }
+  }
+  LogicalResult checkOpen(Operation *op) {
+    opened = buffer.isOpen();
+    if (!opened)
+      return op->emitError("cannot open output file: ") << temporary.string();
+    return success();
+  }
+  LogicalResult finish(Operation *op) {
+    const bool streamGood = output.good();
+    if (!buffer.close() || !streamGood)
+      return op->emitError("failed to write output file: ")
+             << temporary.string();
+    return success();
+  }
+  LogicalResult publish(Operation *op) {
+    std::error_code error;
+    std::filesystem::rename(temporary, path, error);
+    if (error)
+      return op->emitError("cannot publish output file: ")
+             << path.string() << ": " << error.message();
+    published = true;
+    return success();
+  }
+  JsonFileBuffer buffer;
+  std::ostream output;
+};
+
+// Adds the enclosing indentation to a single record's ordinary JSON
+// serializer. Only the explicit diagnostic mode takes this character path.
+class IndentBuffer : public std::streambuf {
+public:
+  IndentBuffer(std::ostream &output, unsigned spaces)
+      : output(output), spaces(spaces) {}
+
+private:
+  int_type overflow(int_type c) override {
+    if (traits_type::eq_int_type(c, traits_type::eof()))
+      return traits_type::not_eof(c);
+    const char value = traits_type::to_char_type(c);
+    output.put(value);
+    if (value == '\n')
+      for (unsigned i = 0; i < spaces; ++i)
+        output.put(' ');
+    return output ? c : traits_type::eof();
+  }
+  std::ostream &output;
+  unsigned spaces;
+};
+
+class JsonStreamWriter {
+public:
+  JsonStreamWriter(std::ostream &output, bool pretty, bool profile)
+      : output(output), pretty(pretty), profile(profile) {
+    output << '{';
+  }
+  void field(llvm::StringRef name, const Json &record) {
+    key(name);
+    value(record, 2);
+  }
+  void beginArray(llvm::StringRef name) {
+    key(name);
+    output << '[';
+    firstRecord = true;
+  }
+  void record(const Json &record) {
+    if (!firstRecord)
+      output << ',';
+    if (pretty)
+      output << "\n    ";
+    firstRecord = false;
+    value(record, 4);
+  }
+  void endArray() {
+    if (pretty && !firstRecord)
+      output << "\n  ";
+    output << ']';
+  }
+  void finish() { output << (pretty ? "\n}\n" : "}\n"); }
+  double serializationSeconds = 0;
+
+private:
+  void key(llvm::StringRef name) {
+    if (!firstField)
+      output << ',';
+    if (pretty)
+      output << "\n  ";
+    firstField = false;
+    output << Json(name.str()) << (pretty ? ": " : ":");
+  }
+  void value(const Json &record, unsigned indent) {
+    const auto start = profile ? Clock::now() : Clock::time_point{};
+    if (pretty) {
+      IndentBuffer buffer(output, indent);
+      std::ostream indented(&buffer);
+      indented << std::setw(2) << record;
+      if (!indented)
+        output.setstate(std::ios::badbit);
+    } else
+      output << record;
+    if (profile)
+      serializationSeconds += elapsed(start);
+  }
+  std::ostream &output;
+  bool pretty, profile, firstField = true, firstRecord = true;
+};
+
 class PlaintextBundleWriter {
 public:
-  PlaintextBundleWriter(std::filesystem::path directory, std::string id)
-      : directory(std::move(directory)), id(std::move(id)) {}
+  PlaintextBundleWriter(std::filesystem::path directory, std::string id,
+                        bool profile)
+      : directory(std::move(directory)),
+        staging(this->directory.string() + ".tmp"), id(std::move(id)),
+        profile(profile) {}
+
+  ~PlaintextBundleWriter() {
+    if (stagingOwned) {
+      std::error_code ignored;
+      std::filesystem::remove_all(staging, ignored);
+    }
+  }
+  LogicalResult initialize(Operation *op) {
+    std::error_code error;
+    if (!std::filesystem::create_directory(staging, error))
+      return op->emitError(
+                 "cannot create RuntimePlan bundle staging directory: ")
+             << staging.string() << ": "
+             << (error ? error.message() : "already exists");
+    stagingOwned = true;
+    if (!std::filesystem::create_directory(staging / "data", error))
+      return op->emitError("cannot create RuntimePlan bundle data directory: ")
+             << error.message();
+    return success();
+  }
+
+  Json statistics() const {
+    return {{"constant_conversion_seconds", conversionSeconds},
+            {"constant_hash_seconds", hashSeconds},
+            {"constant_write_seconds", writeSeconds},
+            {"bundle_bytes", blobBytes},
+            {"unique_blobs", blobs.size()},
+            {"duplicate_hits", duplicateHits},
+            {"manifest_bytes", manifestBytes},
+            {"manifest_seconds", manifestSeconds},
+            {"bundle_reuse_verify_seconds", reuseSeconds}};
+  }
 
   bool used() const { return !blobs.empty(); }
 
   FailureOr<Json> externalize(DenseElementsAttr dense, Operation *op) {
     // Dense attributes are immutable and shared within the MLIR context.
     // Repeated Encode operations can reuse the already validated blob.
-    if (auto it = exported.find(dense); it != exported.end())
+    if (auto it = exported.find(dense); it != exported.end()) {
+      ++duplicateHits;
       return Json{{"kind", "bundle"}, {"content", it->second}};
+    }
     if (!dense.getElementType().isa<FloatType>()) {
       op->emitError(
           "RuntimePlan bundle externalization requires a float payload");
       return failure();
     }
 
+    const auto conversionStart = profile ? Clock::now() : Clock::time_point{};
     std::string bytes;
     const int64_t elements = dense.getNumElements();
     constexpr uint64_t maxBundleBytes = (1ULL << 53) - 1;
@@ -151,48 +388,131 @@ public:
         bytes.push_back(static_cast<char>((bits >> (byte * 8)) & 0xff));
     }
 
+    if (profile)
+      conversionSeconds += elapsed(conversionStart);
+    const auto hashStart = profile ? Clock::now() : Clock::time_point{};
     const std::string content = sha256(bytes);
+    if (profile)
+      hashSeconds += elapsed(hashStart);
     const auto [it, inserted] = blobs.emplace(content, bytes.size());
     if (inserted) {
-      std::error_code error;
-      std::filesystem::create_directories(directory / "data", error);
-      if (error) {
-        op->emitError("cannot create RuntimePlan bundle directory: ")
-            << directory.string() << ": " << error.message();
-        return failure();
-      }
       const std::filesystem::path blobPath =
-          directory / "data" / (content.substr(7) + ".bin");
+          staging / "data" / (content.substr(7) + ".bin");
+      const auto writeStart = profile ? Clock::now() : Clock::time_point{};
       if (failed(writeFile(blobPath, bytes, op)))
         return failure();
+      if (profile)
+        writeSeconds += elapsed(writeStart);
+      blobBytes += bytes.size();
     } else if (it->second != bytes.size()) {
       op->emitError("RuntimePlan bundle SHA-256 collision");
       return failure();
     }
+    if (!inserted)
+      ++duplicateHits;
     exported.try_emplace(dense, content);
     return Json{{"kind", "bundle"}, {"content", content}};
   }
 
-  FailureOr<Json> writeManifest(Operation *op) const {
-    Json entries = Json::array();
-    for (const auto &[content, byteLength] : blobs)
-      entries.push_back(
-          {{"content", content}, {"byte_length", byteLength}});
-    const Json manifest = {{"bundle_format_version", 1},
-                           {"bundle_id", id},
-                           {"version", 1},
-                           {"blobs", std::move(entries)}};
-    const std::string manifestBytes = manifest.dump(2) + '\n';
-    if (failed(writeFile(directory / "manifest.json", manifestBytes, op)))
+  FailureOr<Json> writeManifest(Operation *op) {
+    const auto start = profile ? Clock::now() : Clock::time_point{};
+    JsonArtifact artifact(staging / "manifest.json", profile);
+    if (failed(artifact.checkOpen(op)))
       return failure();
-    return Json{{"id", id},
-                {"version", 1},
-                {"manifest_sha256", sha256(manifestBytes)}};
+    JsonStreamWriter writer(artifact.output, false, profile);
+    writer.field("bundle_format_version", 1);
+    writer.field("bundle_id", id);
+    writer.field("version", 1);
+    writer.beginArray("blobs");
+    for (const auto &[content, byteLength] : blobs)
+      writer.record({{"content", content}, {"byte_length", byteLength}});
+    writer.endArray();
+    writer.finish();
+    if (failed(artifact.finish(op)) || failed(artifact.publish(op)))
+      return failure();
+    manifestDigest = artifact.buffer.digestString;
+    manifestBytes = artifact.buffer.bytes;
+    if (profile)
+      manifestSeconds = elapsed(start);
+    return Json{
+        {"id", id}, {"version", 1}, {"manifest_sha256", manifestDigest}};
+  }
+
+  LogicalResult publish(Operation *op) {
+    if (!used())
+      return success();
+    std::error_code error;
+    const bool exists = std::filesystem::exists(directory, error);
+    if (error)
+      return op->emitError("cannot inspect bundle directory: ")
+             << error.message();
+    if (exists) {
+      // Reusing a published bundle requires its exact manifest and every blob
+      // to match. Replacing a different bundle requires a new output prefix.
+      const auto start = profile ? Clock::now() : Clock::time_point{};
+      auto existingDigest = fileDigest(directory / "manifest.json", op);
+      if (failed(existingDigest))
+        return failure();
+      if (*existingDigest != manifestDigest)
+        return op->emitError("existing plaintext bundle has a different "
+                             "manifest; use a new prefix");
+      for (const auto &[content, length] : blobs) {
+        const auto path = directory / "data" / (content.substr(7) + ".bin");
+        const auto size = std::filesystem::file_size(path, error);
+        if (error || size != length)
+          return op->emitError("existing bundle blob byte length mismatch: ")
+                 << path.string();
+        auto digest = fileDigest(path, op);
+        if (failed(digest))
+          return failure();
+        if (*digest != content)
+          return op->emitError("existing bundle blob SHA-256 mismatch: ")
+                 << path.string();
+      }
+      if (profile)
+        reuseSeconds = elapsed(start);
+      return success();
+    }
+    std::filesystem::rename(staging, directory, error);
+    if (error)
+      return op->emitError("cannot publish plaintext bundle: ")
+             << error.message();
+    stagingOwned = false;
+    publishedNew = true;
+    return success();
+  }
+  void rollback() {
+    if (publishedNew) {
+      std::error_code ignored;
+      std::filesystem::remove_all(directory, ignored);
+    }
   }
 
 private:
-  std::filesystem::path directory;
-  std::string id;
+  static FailureOr<std::string> fileDigest(const std::filesystem::path &path,
+                                           Operation *op) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+      op->emitError("cannot open existing bundle file: ") << path.string();
+      return failure();
+    }
+    llvm::SHA256 hash;
+    std::array<char, 64 * 1024> buffer;
+    while (input.read(buffer.data(), buffer.size()) || input.gcount())
+      hash.update(llvm::StringRef(buffer.data(), input.gcount()));
+    if (input.bad()) {
+      op->emitError("failed to read existing bundle file: ") << path.string();
+      return failure();
+    }
+    const auto digest = hash.final();
+    return "sha256:" + llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true);
+  }
+  std::filesystem::path directory, staging;
+  std::string id, manifestDigest;
+  bool profile, stagingOwned = false, publishedNew = false;
+  double conversionSeconds = 0, hashSeconds = 0, writeSeconds = 0,
+         manifestSeconds = 0, reuseSeconds = 0;
+  uint64_t blobBytes = 0, manifestBytes = 0, duplicateHits = 0;
   std::map<std::string, uint64_t> blobs;
   llvm::DenseMap<Attribute, std::string> exported;
 };
@@ -208,9 +528,8 @@ FailureOr<Json> encodePayload(Attribute payload, Operation *op,
   }
 
   const int64_t elements = dense.getNumElements();
-  if (elements <= 0 ||
-      static_cast<uint64_t>(elements) >
-          std::numeric_limits<uint64_t>::max() / 8) {
+  if (elements <= 0 || static_cast<uint64_t>(elements) >
+                           std::numeric_limits<uint64_t>::max() / 8) {
     op->emitError("RuntimePlan Encode payload size is out of range");
     return failure();
   }
@@ -253,121 +572,130 @@ struct RuntimePlanBuilder {
                      llvm::StringRef bootProfile,
                      llvm::StringRef bootImplementation,
                      PlaintextBundleWriter &bundle,
-                     uint64_t inlinePayloadMaxBytes)
+                     uint64_t inlinePayloadMaxBytes, bool profile)
       : func(func), contextId(contextId), ntt(ntt), bootProfile(bootProfile),
         bootImplementation(bootImplementation), bundle(bundle),
-        inlinePayloadMaxBytes(inlinePayloadMaxBytes) {}
+        inlinePayloadMaxBytes(inlinePayloadMaxBytes), profile(profile) {}
 
-  LogicalResult build(Json &values, Json &externalInputs, Json &initialization,
-                      Json &execution, Json &finalOutputs) {
+  LogicalResult write(JsonStreamWriter &writer) {
     if (!func.getBody().hasOneBlock())
       return func.emitError(
-          "RuntimePlan V1 export currently requires a single-block function");
-
+          "RuntimePlan export currently requires a single-block function");
+    const auto layoutStart = profile ? Clock::now() : Clock::time_point{};
     if (failed(assignIds()))
       return failure();
+    if (profile)
+      layoutSeconds = elapsed(layoutStart);
+    writer.beginArray("values");
     for (const auto &[id, value] : valuesById) {
-      FailureOr<Json> description = buildValueDesc(value, id);
+      auto description = buildValueDesc(value, id);
       if (failed(description))
         return failure();
-      values.push_back(std::move(*description));
+      writer.record(*description);
     }
+    writer.endArray();
+    writer.beginArray("external_inputs");
     for (BlockArgument argument : func.getArguments())
-      externalInputs.push_back(std::to_string(ids.lookup(argument)));
-
-    for (const auto &scheduled : instructions) {
-      Operation &op = *scheduled.operation;
-      if (isa<dist::FenceOp>(op)) {
-        execution.push_back({{"kind", "fence"}});
-        continue;
-      }
-      if (auto release = dyn_cast<dist::ReleaseOp>(op)) {
-        auto id = valueId(release.getInput(), &op);
-        if (failed(id)) return failure();
-        Json instruction = {{"kind", "release"}, {"value", *id}};
-        (scheduled.initialization ? initialization : execution).push_back(std::move(instruction));
-        continue;
-      }
-      if (op.getNumRegions() != 0)
-        return op.emitError(
-            "RuntimePlan V1 export does not support nested control flow");
-      if (op.getNumResults() != 1 ||
-          (op.getName().getDialectNamespace() != "ckks" &&
-           op.getName().getDialectNamespace() != "dist"))
-        return op.emitError("unsupported operation in RuntimePlan export");
-      const uint64_t outputId = ids.lookup(op.getResult(0));
-
-      if (auto encode = dyn_cast<ckks::EncodeOp>(op)) {
-        FailureOr<Json> payload = encodePayload(
-            encode.getPayload(), &op, bundle, inlinePayloadMaxBytes);
-        if (failed(payload))
+      writer.record(std::to_string(ids.lookup(argument)));
+    writer.endArray();
+    // Layout owns both numbering and phase order. Never assign export-local IDs
+    // or move V3's online Encode operations into initialization.
+    for (bool initialization : {true, false}) {
+      writer.beginArray(initialization ? "initialization" : "execution");
+      for (const auto &scheduled : instructions) {
+        if (scheduled.initialization != initialization)
+          continue;
+        auto instruction = buildInstruction(scheduled.operation);
+        if (failed(instruction))
           return failure();
-        (scheduled.initialization ? initialization : execution).push_back({{"kind", "encode"},
-                                  {"payload", std::move(*payload)},
-                                  {"output", std::to_string(outputId)}});
-        continue;
+        (*instruction)["ordinal"] = scheduled.ordinal;
+        writer.record(*instruction);
       }
-
-      if (auto transfer = dyn_cast<dist::TransferOp>(op)) {
-        FailureOr<std::string> inputId = valueId(transfer.getInput(), &op);
-        if (failed(inputId))
-          return failure();
-        auto type = ckks::getPolyType(transfer.getResult());
-        Json instruction = {
-            {"kind", "transfer"},
-            {"transfer_id", std::to_string(transfer.getTransferId())},
-            {"hint", "point_to_point"},
-            {"inputs", Json::array({*inputId})},
-            {"outputs", Json::array({std::to_string(outputId)})},
-            {"sources",
-             Json::array({placeJson(transfer.getSourceRankAttr().getInt(),
-                                    transfer.getSourceDeviceAttr().getInt())})},
-            {"destinations",
-             Json::array(
-                 {placeJson(transfer.getDestinationRankAttr().getInt(),
-                            transfer.getDestinationDeviceAttr().getInt())})},
-            {"output_kinds",
-             Json::array({type.getComponents() == 1 ? "plaintext"
-                                                    : "ciphertext"})}};
-        if (transfer.getInitialization())
-          initialization.push_back(std::move(instruction));
-        else
-          execution.push_back(std::move(instruction));
-        continue;
-      }
-
-      FailureOr<Json> instruction = buildCompute(&op, outputId);
-      if (failed(instruction))
-        return failure();
-      execution.push_back(std::move(*instruction));
+      writer.endArray();
     }
-
-    uint64_t ordinal = 0;
-    for (Json &instruction : initialization)
-      instruction["ordinal"] = ordinal++;
-    for (Json &instruction : execution)
-      instruction["ordinal"] = ordinal++;
-
+    writer.field("finalization", Json::array());
     auto returnOp =
         dyn_cast<func::ReturnOp>(func.getBody().front().getTerminator());
     if (!returnOp)
       return func.emitError("RuntimePlan export requires func.return");
     if (returnOp.getNumOperands() == 0)
-      return func.emitError(
-          "RuntimePlan V1 requires at least one final output");
+      return func.emitError("RuntimePlan requires at least one final output");
+    writer.beginArray("final_outputs");
     for (Value output : returnOp.getOperands()) {
       auto it = ids.find(output);
       if (it == ids.end())
         return returnOp.emitError("final output has no RuntimePlan ValueId");
-      finalOutputs.push_back(std::to_string(it->second));
+      writer.record(std::to_string(it->second));
     }
+    writer.endArray();
     return success();
+  }
+  double layoutSeconds = 0;
+  std::size_t valueCount() const { return valuesById.size(); }
+  std::size_t instructionCount() const { return instructions.size(); }
+
+private:
+  FailureOr<Json> buildInstruction(Operation *operation) {
+    Operation &op = *operation;
+    if (isa<dist::FenceOp>(op))
+      return Json{{"kind", "fence"}};
+    if (auto release = dyn_cast<dist::ReleaseOp>(op)) {
+      auto id = valueId(release.getInput(), &op);
+      if (failed(id))
+        return failure();
+      return Json{{"kind", "release"}, {"value", *id}};
+    }
+    if (op.getNumRegions() != 0) {
+      op.emitError("RuntimePlan export does not support nested control flow");
+      return failure();
+    }
+    if (op.getNumResults() != 1 ||
+        (op.getName().getDialectNamespace() != "ckks" &&
+         op.getName().getDialectNamespace() != "dist")) {
+      op.emitError("unsupported operation in RuntimePlan export");
+      return failure();
+    }
+    const uint64_t outputId = ids.lookup(op.getResult(0));
+    if (auto encode = dyn_cast<ckks::EncodeOp>(op)) {
+      auto payload = encodePayload(encode.getPayload(), &op, bundle,
+                                   inlinePayloadMaxBytes);
+      if (failed(payload))
+        return failure();
+      return Json{{"kind", "encode"},
+                  {"payload", std::move(*payload)},
+                  {"output", std::to_string(outputId)}};
+    }
+    if (auto transfer = dyn_cast<dist::TransferOp>(op)) {
+      FailureOr<std::string> inputId = valueId(transfer.getInput(), &op);
+      if (failed(inputId))
+        return failure();
+      auto type = ckks::getPolyType(transfer.getResult());
+      Json instruction = {
+          {"kind", "transfer"},
+          {"transfer_id", std::to_string(transfer.getTransferId())},
+          {"hint", "point_to_point"},
+          {"inputs", Json::array({*inputId})},
+          {"outputs", Json::array({std::to_string(outputId)})},
+          {"sources",
+           Json::array({placeJson(transfer.getSourceRankAttr().getInt(),
+                                  transfer.getSourceDeviceAttr().getInt())})},
+          {"destinations", Json::array({placeJson(
+                               transfer.getDestinationRankAttr().getInt(),
+                               transfer.getDestinationDeviceAttr().getInt())})},
+          {"output_kinds",
+           Json::array(
+               {type.getComponents() == 1 ? "plaintext" : "ciphertext"})}};
+      return instruction;
+    }
+
+    return buildCompute(&op, outputId);
   }
 
 private:
   LogicalResult assignIds() {
     auto layout = ckks::buildRuntimePlanLayout(func);
-    if (failed(layout)) return failure();
+    if (failed(layout))
+      return failure();
     ids = std::move(layout->ids);
     valuesById = std::move(layout->values);
     instructions = std::move(layout->instructions);
@@ -376,7 +704,8 @@ private:
 
   FailureOr<Json> valuePlace(Value value) {
     auto place = ckks::runtimePlace(value, func);
-    if (failed(place)) return failure();
+    if (failed(place))
+      return failure();
     return placeJson(place->rank, place->device);
   }
 
@@ -403,15 +732,15 @@ private:
     FailureOr<Json> place = valuePlace(value);
     if (failed(place))
       return failure();
-    return Json{{"id", std::to_string(id)},
-                {"kind", type.getComponents() == 1 ? "plaintext"
-                                                    : "ciphertext"},
-                {"place", std::move(*place)},
-                {"context", contextId},
-                {"level", type.getLevel()},
-                {"scale_log2", type.getScaleLog2()},
-                {"ntt", ntt},
-                {"components", type.getComponents()}};
+    return Json{
+        {"id", std::to_string(id)},
+        {"kind", type.getComponents() == 1 ? "plaintext" : "ciphertext"},
+        {"place", std::move(*place)},
+        {"context", contextId},
+        {"level", type.getLevel()},
+        {"scale_log2", type.getScaleLog2()},
+        {"ntt", ntt},
+        {"components", type.getComponents()}};
   }
 
   FailureOr<std::string> valueId(Value value, Operation *user) const {
@@ -436,10 +765,10 @@ private:
     if (failed(place))
       return failure();
     Json instruction = {{"kind", "compute"},
-                {"op", name.str()},
-                {"place", std::move(*place)},
-                {"inputs", std::move(inputIds)},
-                {"output", std::to_string(outputId)}};
+                        {"op", name.str()},
+                        {"place", std::move(*place)},
+                        {"inputs", std::move(inputIds)},
+                        {"output", std::to_string(outputId)}};
     if (Attribute reuse = op->getAttr("runtime.reuse_input")) {
       auto index = dyn_cast<IntegerAttr>(reuse);
       if (!index || index.getInt() != 0) {
@@ -526,6 +855,7 @@ private:
   std::string bootImplementation;
   PlaintextBundleWriter &bundle;
   uint64_t inlinePayloadMaxBytes;
+  bool profile;
   llvm::DenseMap<Value, uint64_t> ids;
   std::map<uint64_t, Value> valuesById;
   std::vector<ckks::RuntimeInstruction> instructions;
@@ -575,11 +905,6 @@ struct EmitRuntimePlanPass
       return;
     }
 
-    Json values = Json::array();
-    Json externalInputs = Json::array();
-    Json initialization = Json::array();
-    Json execution = Json::array();
-    Json finalOutputs = Json::array();
     Json emittedDeviceCounts = Json::array();
     int64_t worldSize = 1;
     if (auto placedCounts =
@@ -603,73 +928,92 @@ struct EmitRuntimePlanPass
     }
     const std::string artifactStem =
         prefix.getValue() + "." + func.getName().str();
-    PlaintextBundleWriter bundle(
-        artifactStem + ".bundle",
-        "runtime-plan-" + planId.getValue() + "-" + func.getName().str() +
-            "-plaintexts");
-    RuntimePlanBuilder builder(func, contextId.getValue(), ntt.getValue(),
-                               bootProfile.getValue(),
-                               bootImplementation.getValue(), bundle,
-                               static_cast<uint64_t>(
-                                   inlinePayloadMaxBytes.getValue()));
+    bool version2 = func->hasAttr("runtime.memory_planned");
+    bool version3 = func->hasAttr("runtime.streaming");
+    func.walk([&](Operation *op) {
+      version2 |=
+          isa<dist::ReleaseOp>(op) || op->hasAttr("runtime.reuse_input");
+      version3 |= isa<dist::FenceOp>(op) || op->hasAttr("runtime.streaming");
+    });
+    const auto exportStart = Clock::now();
+    const auto rssStart = residentBytes();
+    JsonArtifact artifact(artifactStem + ".runtime-plan.json",
+                          reportIo.getValue());
+    if (failed(artifact.checkOpen(func))) {
+      signalPassFailure();
+      return;
+    }
+    PlaintextBundleWriter bundle(artifactStem + ".bundle",
+                                 "runtime-plan-" + planId.getValue() + "-" +
+                                     func.getName().str() + "-plaintexts",
+                                 reportIo.getValue());
+    if (failed(bundle.initialize(func))) {
+      signalPassFailure();
+      return;
+    }
+    JsonStreamWriter writer(artifact.output, pretty.getValue(),
+                            reportIo.getValue());
+    writer.field("format_version", version3 ? 3 : (version2 ? 2 : 1));
+    writer.field("plan_id", planId.getValue());
+    writer.field("target",
+                 {{"target_id", targetId.getValue()},
+                  {"capability_version", capabilityVersion.getValue()},
+                  {"operator_spec",
+                   {{"id", operatorSpecId.getValue()},
+                    {"version", operatorSpecVersion.getValue()},
+                    {"source_sha256", operatorSpecSha256.getValue()}}},
+                  {"world_size", worldSize},
+                  {"device_counts", emittedDeviceCounts}});
+    RuntimePlanBuilder builder(
+        func, contextId.getValue(), ntt.getValue(), bootProfile.getValue(),
+        bootImplementation.getValue(), bundle,
+        static_cast<uint64_t>(inlinePayloadMaxBytes.getValue()),
+        reportIo.getValue());
     const auto buildStart = Clock::now();
-    if (failed(builder.build(values, externalInputs, initialization, execution,
-                             finalOutputs))) {
+    if (failed(builder.write(writer))) {
       signalPassFailure();
       return;
     }
     const double buildSeconds = elapsed(buildStart);
-
-    bool version2 = func->hasAttr("runtime.memory_planned");
-    bool version3 = func->hasAttr("runtime.streaming");
-    func.walk([&](Operation *op) {
-      version2 |= isa<dist::ReleaseOp>(op) || op->hasAttr("runtime.reuse_input");
-      version3 |= isa<dist::FenceOp>(op) || op->hasAttr("runtime.streaming");
-    });
-    Json plan = {{"format_version", version3 ? 3 : (version2 ? 2 : 1)},
-                 {"plan_id", planId.getValue()},
-                 {"target",
-                  {{"target_id", targetId.getValue()},
-                   {"capability_version", capabilityVersion.getValue()},
-                   {"operator_spec",
-                    {{"id", operatorSpecId.getValue()},
-                     {"version", operatorSpecVersion.getValue()},
-                     {"source_sha256", operatorSpecSha256.getValue()}}},
-                   {"world_size", worldSize},
-                   {"device_counts", std::move(emittedDeviceCounts)}}},
-                 {"values", std::move(values)},
-                 {"external_inputs", std::move(externalInputs)},
-                 {"initialization", std::move(initialization)},
-                 {"execution", std::move(execution)},
-                 {"finalization", Json::array()},
-                 {"final_outputs", std::move(finalOutputs)}};
-
-    const auto manifestStart = Clock::now();
     if (bundle.used()) {
-      FailureOr<Json> reference = bundle.writeManifest(func);
+      auto reference = bundle.writeManifest(func);
       if (failed(reference)) {
         signalPassFailure();
         return;
       }
-      plan["plaintext_bundle"] = std::move(*reference);
+      writer.field("plaintext_bundle", *reference);
     }
-    const double manifestSeconds = elapsed(manifestStart);
-
-    const std::filesystem::path outputPath =
-        artifactStem + ".runtime-plan.json";
-    const auto writeStart = Clock::now();
-    if (failed(writeJsonFile(outputPath, plan, pretty.getValue(), func))) {
+    writer.finish();
+    if (failed(artifact.finish(func))) {
+      signalPassFailure();
+      return;
+    }
+    if (failed(bundle.publish(func))) {
+      signalPassFailure();
+      return;
+    }
+    if (failed(artifact.publish(func))) {
+      bundle.rollback();
       signalPassFailure();
       return;
     }
     if (reportIo) {
-      llvm::errs() << "runtime-plan-io "
-                   << Json{{"build_seconds", buildSeconds},
-                           {"manifest_seconds", manifestSeconds},
-                           {"plan_write_seconds", elapsed(writeStart)},
-                           {"plan_bytes", std::filesystem::file_size(outputPath)},
-                           {"pretty", pretty.getValue()}}.dump()
-                   << '\n';
+      Json report = bundle.statistics();
+      report.update({{"export_seconds", elapsed(exportStart)},
+                     {"layout_seconds", builder.layoutSeconds},
+                     {"build_seconds", buildSeconds},
+                     {"plan_serialize_seconds", writer.serializationSeconds},
+                     {"plan_write_seconds", artifact.buffer.writeSeconds},
+                     {"plan_hash_seconds", artifact.buffer.hashSeconds},
+                     {"plan_bytes", artifact.buffer.bytes},
+                     {"plan_sha256", artifact.buffer.digestString},
+                     {"values", builder.valueCount()},
+                     {"instructions", builder.instructionCount()},
+                     {"rss_start_bytes", rssStart},
+                     {"rss_end_bytes", residentBytes()},
+                     {"process_peak_rss_bytes", peakResidentBytes()},
+                     {"pretty", pretty.getValue()}});
+      llvm::errs() << "runtime-plan-io " << report.dump() << '\n';
     }
   }
 };

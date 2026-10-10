@@ -39,6 +39,10 @@ def main():
             report = json.loads(next(line.removeprefix("runtime-plan-io ")
                                      for line in result.stderr.splitlines() if line.startswith("runtime-plan-io ")))
             assert report["plan_bytes"] == len(raw)
+            assert report["plan_sha256"] == "sha256:" + hashlib.sha256(raw).hexdigest()
+            assert report["unique_blobs"] == 1 and report["duplicate_hits"] == 1
+            assert report["bundle_bytes"] == 600 * 8
+            assert report["manifest_bytes"] == len(manifest)
             assert report["pretty"] == pretty
             assert not list(temp.rglob("*.tmp"))
             return plan, raw
@@ -59,6 +63,34 @@ def main():
                                 capture_output=True, text=True)
         assert result.returncode != 0 and "cannot open output file" in result.stderr
         assert output.read_bytes() == compact_bytes
+        temporary.rmdir()
+        bundle = Path(f"{prefix}.bundle_reuse.bundle")
+        original_manifest = (bundle / "manifest.json").read_bytes()
+        blob = next((bundle / "data").glob("*.bin"))
+        original_blob = blob.read_bytes()
+        blob.write_bytes(bytes([original_blob[0] ^ 1]) + original_blob[1:])
+        result = subprocess.run([str(args.hecate_opt), str(ir),
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context}}))",
+                                 "-o", "/dev/null"], cwd=args.source_dir,
+                                capture_output=True, text=True)
+        assert result.returncode != 0 and "existing bundle blob SHA-256 mismatch" in result.stderr
+        assert output.read_bytes() == compact_bytes
+        assert (bundle / "manifest.json").read_bytes() == original_manifest
+        assert not list(temp.rglob("*.tmp"))
+        blob.write_bytes(original_blob)
+        # Fail after the first Encode wrote a blob: no final artifact survives.
+        bad = temp / "bad.mlir"
+        text = ir.read_text()
+        index = text.rfind('"ckks.encode"')
+        assert index >= 0
+        bad.write_text(text[:index] + text[index:].replace('"ckks.encode"', '"test.unsupported"', 1))
+        bad_prefix = temp / "failed"
+        result = subprocess.run([str(args.hecate_opt), str(bad), "--allow-unregistered-dialect",
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={bad_prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context}}))",
+                                 "-o", "/dev/null"], cwd=args.source_dir,
+                                capture_output=True, text=True)
+        assert result.returncode != 0 and "unsupported operation" in result.stderr
+        assert not list(temp.glob("failed.*"))
     print("RuntimePlan I/O checks passed")
 
 
