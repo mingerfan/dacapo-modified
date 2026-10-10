@@ -586,10 +586,12 @@ struct EmitRuntimePlanPass
     }
 
     bool version2 = func->hasAttr("runtime.memory_planned");
+    bool version3 = func->hasAttr("runtime.streaming");
     func.walk([&](Operation *op) {
       version2 |= isa<dist::ReleaseOp>(op) || op->hasAttr("runtime.reuse_input");
+      version3 |= isa<dist::FenceOp>(op) || op->hasAttr("runtime.streaming");
     });
-    Json plan = {{"format_version", func->hasAttr("runtime.streaming") ? 3 : (version2 ? 2 : 1)},
+    Json plan = {{"format_version", version3 ? 3 : (version2 ? 2 : 1)},
                  {"plan_id", planId.getValue()},
                  {"target",
                   {{"target_id", targetId.getValue()},

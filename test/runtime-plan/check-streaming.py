@@ -85,6 +85,16 @@ def main():
                                  ({'pinned': 127}, 'pinned requires'), ({'raw': 15}, 'raw Encode payload')]:
             error = compile(12, **options)
             assert isinstance(error, str) and message in error, error
+        # A hand-authored Fence must survive CSE/DCE and select V3 without
+        # relying on an attribute installed by the streaming pass.
+        fence = temp / 'fence.mlir'
+        fence.write_text(source(1).replace('return %v0', '"dist.fence"() : () -> ()\nreturn %v0'))
+        subprocess.run([str(args.hecate_opt), str(fence),
+            f'-p=builtin.module(func.func(canonicalize,cse,emit-runtime-plan{{prefix={temp}/fence target-id=test operator-spec-id=test operator-spec-sha256=sha256:{"0"*64} context-id=test-context}}))',
+            '-o', str(temp/'fence.out.mlir')], cwd=args.source_dir, check=True, capture_output=True)
+        emitted = json.loads((temp/'fence.stream.runtime-plan.json').read_text())
+        assert emitted['format_version'] == 3
+        assert sum(op['kind'] == 'fence' for op in emitted['execution']) == 1
         report = compile(20000)
         assert isinstance(report, dict), report
         print('PASS streaming equivalence, independent retained-allocation bounds, all budgets, re-encoding, prefetch, 20000 operations')
