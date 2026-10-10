@@ -77,6 +77,8 @@ def main():
             assert peak == report['object_peak_bytes_host_then_gpu'][1]
             assert report['pinned_peak_bytes'] <= pinned and report['raw_peak_bytes'] <= raw
             assert report['encodes'] > 1
+            assert report['distinct_encode_definitions'] == 1
+            assert report['reencodes'] == report['encodes'] - 1
             return report
         for prefetch in [0, 4096]:
             report = compile(12, prefetch=prefetch)

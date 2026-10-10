@@ -23,6 +23,11 @@ uint64_t addBytes(uint64_t a, uint64_t b) {
     throw std::runtime_error("streaming byte count overflow");
   return a + b;
 }
+uint64_t multiplyBytes(uint64_t a, uint64_t b) {
+  if (b && a > std::numeric_limits<uint64_t>::max() / b)
+    throw std::runtime_error("streaming byte count overflow");
+  return a * b;
+}
 struct PlanPlaintextStreamingPass
     : ckks::impl::PlanPlaintextStreamingBase<PlanPlaintextStreamingPass> {
   using Base::Base;
@@ -60,7 +65,8 @@ struct PlanPlaintextStreamingPass
         throw std::runtime_error("streaming requires physical CKKS types");
       uint64_t words = uint64_t(type.getLevel()) + 1;
       if (words > (1ULL << 20)) throw std::runtime_error("invalid physical limb count");
-      return degree * words * type.getComponents() * (placeOf(v) == 0 ? 8 : 4);
+      return multiplyBytes(multiplyBytes(multiplyBytes(degree, words),
+                                         type.getComponents()), placeOf(v) == 0 ? 8 : 4);
     };
     const size_t places = counts.asArrayRef()[0] + 1;
     std::vector<uint64_t> live(places), batch(places), peak(places);
@@ -103,6 +109,7 @@ struct PlanPlaintextStreamingPass
     for (const auto &[id, v] : layout->values)
       if (auto *op = v.getDefiningOp()) op->setAttr("runtime.value_id", builder.getI64IntegerAttr(id));
     llvm::DenseMap<Value, Value> copies;
+    llvm::DenseSet<Value> encodedRoots;
     SmallVector<Operation *> preparations;
     Operation *first = nullptr;
     uint64_t pinned = 0, pinnedPeak = 0, rawPeak = 0, prefetched = 0;
@@ -178,11 +185,17 @@ struct PlanPlaintextStreamingPass
         if (auto encode = dyn_cast<ckks::EncodeOp>(v.getDefiningOp())) {
           auto payload = dyn_cast<DenseElementsAttr>(encode.getPayload());
           if (!payload) throw std::runtime_error("streaming requires dense Encode payload");
-          uint64_t raw = uint64_t(payload.getNumElements()) * 16; // bytes + decoded vector
+          if (payload.getNumElements() <= 0 || uint64_t(payload.getNumElements()) > degree / 2)
+            throw std::runtime_error("streaming Encode payload exceeds CKKS slot capacity");
+          uint64_t raw = multiplyBytes(uint64_t(payload.getNumElements()), 16); // file + decoded vector
           if (raw > rawBudget) throw std::runtime_error("raw Encode payload requires " +
               std::to_string(raw) + " bytes, budget " + std::to_string(rawBudget.getValue()));
           rawPeak = std::max(rawPeak, raw); ++encodes;
+          encodedRoots.insert(v);
         } else { ++uploads; uploadBytes = addBytes(uploadBytes, bytesOf(v)); }
+        if (nextId >= uint64_t(std::numeric_limits<int64_t>::max()) ||
+            transferId >= uint64_t(std::numeric_limits<int64_t>::max()))
+          throw std::runtime_error("streaming ValueId/TransferId space exhausted");
         builder.setInsertionPoint(ret);
         Operation *copy = builder.clone(*v.getDefiningOp());
         if (isa<dist::TransferOp>(copy)) {
@@ -222,6 +235,8 @@ struct PlanPlaintextStreamingPass
     }
     func->setAttr("runtime.streaming", builder.getUnitAttr());
     Json report = {{"format_version", 1}, {"batches", batches}, {"encodes", encodes},
+      {"distinct_encode_definitions", encodedRoots.size()},
+      {"reencodes", encodes - encodedRoots.size()},
       {"uploads", uploads}, {"upload_bytes", uploadBytes}, {"object_peak_bytes_host_then_gpu", peak},
       {"pinned_peak_bytes", pinnedPeak}, {"raw_peak_bytes", rawPeak},
       {"gpu_budget_bytes", gpuBudget.getValue()}, {"host_budget_bytes", hostBudget.getValue()},
