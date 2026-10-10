@@ -34,3 +34,9 @@ LogicalResult hecate::dist::TransferOp::verify() {
     return emitOpError("source and destination must differ");
   return success();
 }
+
+LogicalResult hecate::dist::ReleaseOp::verify() {
+  if (!hecate::ckks::getPolyType(getInput()))
+    return emitOpError("input must be a CKKS polynomial value");
+  return success();
+}

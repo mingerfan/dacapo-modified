@@ -4,6 +4,9 @@ add_mlir_dialect_library(CKKSTransforms
   MaterializePhysicalLevels.cpp
   MaterializeCommunication.cpp
   EmitRuntimePlan.cpp
+  RuntimePlanUtils.cpp
+  PlanRuntimeMemory.cpp
+  EstimateRuntimeMemory.cpp
   DEPENDS
   HecateCKKSTransformsIncGen
   LINK_LIBS
@@ -12,3 +15,6 @@ add_mlir_dialect_library(CKKSTransforms
   DistDialect
   MLIRIR
   )
+
+# Convert JSON and arithmetic failures into pass diagnostics.
+set_source_files_properties(EstimateRuntimeMemory.cpp PROPERTIES COMPILE_OPTIONS "-fexceptions")

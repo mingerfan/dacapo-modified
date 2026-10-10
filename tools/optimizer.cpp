@@ -301,6 +301,13 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       cl::desc("Largest RuntimePlan Encode payload kept inline"),
       cl::init(4096)};
 
+  static cl::opt<bool> runtime_plan_memory{
+      "runtime-plan-memory", cl::desc("Plan Release and supported input reuse"), cl::init(false)};
+  static cl::opt<bool> runtime_plan_memory_reuse{
+      "runtime-plan-memory-reuse", cl::desc("Enable input reuse in memory planning"), cl::init(true)};
+  static cl::opt<bool> runtime_plan_memory_report{
+      "runtime-plan-memory-report", cl::desc("Write per-place object memory estimates"), cl::init(false)};
+
   auto addRuntimePlanExport = [&](OpPassManager &pm,
                                   const std::string &artifactPrefix) {
     if (!runtime_plan_physical_level_operator_spec_path.empty() ||
@@ -329,6 +336,22 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       pm.addNestedPass<func::FuncOp>(
           hecate::ckks::createMaterializeCommunication());
     }
+    auto addMemoryReport = [&](const std::string &tag) {
+      hecate::ckks::EstimateRuntimeMemoryOptions estimate;
+      estimate.prefix = artifactPrefix;
+      estimate.operatorSpecPath = runtime_plan_physical_level_operator_spec_path.empty()
+          ? runtime_plan_operator_spec_path.getValue()
+          : runtime_plan_physical_level_operator_spec_path.getValue();
+      estimate.reportTag = tag;
+      pm.addNestedPass<func::FuncOp>(hecate::ckks::createEstimateRuntimeMemory(estimate));
+    };
+    if (runtime_plan_memory_report && runtime_plan_memory) addMemoryReport("before");
+    if (runtime_plan_memory) {
+      hecate::ckks::PlanRuntimeMemoryOptions memory;
+      memory.enableReuse = runtime_plan_memory_reuse;
+      pm.addNestedPass<func::FuncOp>(hecate::ckks::createPlanRuntimeMemory(memory));
+    }
+    if (runtime_plan_memory_report) addMemoryReport("");
     hecate::ckks::EmitRuntimePlanOptions options;
     options.prefix = artifactPrefix;
     options.planId = runtime_plan_id;

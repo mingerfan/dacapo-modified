@@ -98,4 +98,22 @@ def MaterializeCommunication : Pass<"materialize-ckks-communication",
   }];
 }
 
+def PlanRuntimeMemory : Pass<"plan-runtime-memory", "::mlir::func::FuncOp"> {
+  let dependentDialects = ["hecate::dist::DistDialect"];
+  let summary = "Mark safe input reuse and release values after their last runtime use";
+  let options = [
+    Option<"enableReuse", "enable-reuse", "bool", [{true}],
+           "Enable supported in-place operations; false plans only Release">
+  ];
+}
+
+def EstimateRuntimeMemory : Pass<"estimate-runtime-memory", "::mlir::func::FuncOp"> {
+  let summary = "Report per-place object peaks under sequential completion";
+  let options = [
+    Option<"prefix", "prefix", "std::string", [{""}], "Output filename prefix">,
+    Option<"operatorSpecPath", "operator-spec", "std::string", [{""}], "OperatorSpec JSON path">,
+    Option<"reportTag", "report-tag", "std::string", [{""}], "Optional report filename suffix">
+  ];
+}
+
 #endif

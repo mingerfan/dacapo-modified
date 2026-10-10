@@ -3,6 +3,7 @@
 
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def Dist_Dialect : Dialect {
   let name = "dist";
@@ -22,6 +23,12 @@ def TransferOp : Dist_Op<"transfer", [SameOperandsAndResultType]> {
                        I64Attr:$destination_device,
                        BoolAttr:$initialization);
   let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+}
+
+def ReleaseOp : Dist_Op<"release", [MemoryEffects<[MemFree]>]> {
+  let summary = "Release the runtime reference after the last use of a CKKS value";
+  let arguments = (ins AnyRankedTensor:$input, BoolAttr:$initialization);
   let hasVerifier = 1;
 }
 

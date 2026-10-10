@@ -1,5 +1,6 @@
 #include "hecate/Dialect/CKKS/IR/CKKSOps.h"
 #include "hecate/Dialect/CKKS/Transforms/Passes.h"
+#include "hecate/Dialect/CKKS/Transforms/RuntimePlanUtils.h"
 #include "hecate/Dialect/Dist/IR/DistOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -235,9 +236,15 @@ struct RuntimePlanBuilder {
     for (BlockArgument argument : func.getArguments())
       externalInputs.push_back(std::to_string(ids.lookup(argument)));
 
-    for (Operation &op : func.getBody().front()) {
-      if (isa<func::ReturnOp>(op))
+    for (const auto &scheduled : instructions) {
+      Operation &op = *scheduled.operation;
+      if (auto release = dyn_cast<dist::ReleaseOp>(op)) {
+        auto id = valueId(release.getInput(), &op);
+        if (failed(id)) return failure();
+        Json instruction = {{"kind", "release"}, {"value", *id}};
+        (scheduled.initialization ? initialization : execution).push_back(std::move(instruction));
         continue;
+      }
       if (op.getNumRegions() != 0)
         return op.emitError(
             "RuntimePlan V1 export does not support nested control flow");
@@ -315,74 +322,19 @@ struct RuntimePlanBuilder {
   }
 
 private:
-  LogicalResult registerId(Value value, uint64_t id) {
-    if (ids.count(value) || valuesById.count(id)) {
-      if (Operation *definition = value.getDefiningOp())
-        return definition->emitError("duplicate RuntimePlan logical ValueId");
-      return func.emitError("duplicate RuntimePlan argument ValueId");
-    }
-    ids.insert({value, id});
-    valuesById.emplace(id, value);
-    nextValueId = std::max(nextValueId, id + 1);
-    return success();
-  }
-
   LogicalResult assignIds() {
-    const bool placed = func->hasAttr("dist.device_counts");
-    uint64_t implicitId = 0;
-    for (BlockArgument argument : func.getArguments())
-      if (failed(registerId(argument, implicitId++)))
-        return failure();
-    for (Operation &op : func.getBody().front()) {
-      if (op.getName().getDialectNamespace() != "ckks")
-        continue;
-      auto logicalId = op.getAttrOfType<IntegerAttr>("dist.logical_id");
-      if (placed && !logicalId)
-        return op.emitError("placed CKKS operation is missing logical ValueId");
-      const uint64_t id = logicalId
-                              ? static_cast<uint64_t>(logicalId.getInt())
-                              : implicitId++;
-      if (failed(registerId(op.getResult(0), id)))
-        return failure();
-    }
-    for (Operation &op : func.getBody().front()) {
-      if (auto transfer = dyn_cast<dist::TransferOp>(op))
-        if (failed(registerId(transfer.getResult(), nextValueId)))
-          return failure();
-    }
+    auto layout = ckks::buildRuntimePlanLayout(func);
+    if (failed(layout)) return failure();
+    ids = std::move(layout->ids);
+    valuesById = std::move(layout->values);
+    instructions = std::move(layout->instructions);
     return success();
   }
 
   FailureOr<Json> valuePlace(Value value) {
-    IntegerAttr rank;
-    IntegerAttr device;
-    if (auto argument = value.dyn_cast<BlockArgument>()) {
-      rank = func.getArgAttrOfType<IntegerAttr>(argument.getArgNumber(),
-                                                "dist.rank");
-      device = func.getArgAttrOfType<IntegerAttr>(argument.getArgNumber(),
-                                                  "dist.device");
-    } else {
-      Operation *definition = value.getDefiningOp();
-      rank = definition->getAttrOfType<IntegerAttr>("dist.rank");
-      device = definition->getAttrOfType<IntegerAttr>("dist.device");
-    }
-    if (!rank || !device) {
-      if (!func->hasAttr("dist.device_counts"))
-        return placeJson(0, -1);
-      if (Operation *definition = value.getDefiningOp())
-        definition->emitError("placed value is missing dist.rank/dist.device");
-      else
-        func.emitError("placed argument is missing dist.rank/dist.device");
-      return failure();
-    }
-    if (rank.getInt() < 0 || device.getInt() < -1) {
-      if (Operation *definition = value.getDefiningOp())
-        definition->emitError("invalid physical place");
-      else
-        func.emitError("invalid physical argument place");
-      return failure();
-    }
-    return placeJson(rank.getInt(), device.getInt());
+    auto place = ckks::runtimePlace(value, func);
+    if (failed(place)) return failure();
+    return placeJson(place->rank, place->device);
   }
 
   FailureOr<Json> buildValueDesc(Value value, uint64_t id) {
@@ -440,11 +392,20 @@ private:
     FailureOr<Json> place = valuePlace(op->getResult(0));
     if (failed(place))
       return failure();
-    return Json{{"kind", "compute"},
+    Json instruction = {{"kind", "compute"},
                 {"op", name.str()},
                 {"place", std::move(*place)},
                 {"inputs", std::move(inputIds)},
                 {"output", std::to_string(outputId)}};
+    if (Attribute reuse = op->getAttr("runtime.reuse_input")) {
+      auto index = dyn_cast<IntegerAttr>(reuse);
+      if (!index || index.getInt() != 0) {
+        op->emitError("runtime.reuse_input must be integer zero");
+        return failure();
+      }
+      instruction["reuse_input"] = 0;
+    }
+    return instruction;
   }
 
   FailureOr<Json> buildCompute(Operation *op, uint64_t outputId) {
@@ -524,7 +485,7 @@ private:
   uint64_t inlinePayloadMaxBytes;
   llvm::DenseMap<Value, uint64_t> ids;
   std::map<uint64_t, Value> valuesById;
-  uint64_t nextValueId = 0;
+  std::vector<ckks::RuntimeInstruction> instructions;
 };
 
 struct EmitRuntimePlanPass
@@ -614,7 +575,11 @@ struct EmitRuntimePlanPass
       return;
     }
 
-    Json plan = {{"format_version", 1},
+    bool version2 = func->hasAttr("runtime.memory_planned");
+    func.walk([&](Operation *op) {
+      version2 |= isa<dist::ReleaseOp>(op) || op->hasAttr("runtime.reuse_input");
+    });
+    Json plan = {{"format_version", version2 ? 2 : 1},
                  {"plan_id", planId.getValue()},
                  {"target",
                   {{"target_id", targetId.getValue()},

@@ -7,3 +7,11 @@ add_test(
           --hecate-opt $<TARGET_FILE:hecate-opt>
           --source-dir ${PROJECT_SOURCE_DIR}
 )
+
+add_test(
+  NAME DacapoRuntimeMemory
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-memory.py
+          --hecate-opt $<TARGET_FILE:hecate-opt>
+          --source-dir ${PROJECT_SOURCE_DIR}
+)
