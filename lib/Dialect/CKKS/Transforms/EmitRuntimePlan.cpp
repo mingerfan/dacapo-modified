@@ -1,6 +1,7 @@
 #include "hecate/Dialect/CKKS/IR/CKKSOps.h"
 #include "hecate/Dialect/CKKS/Transforms/Passes.h"
 #include "hecate/Dialect/CKKS/Transforms/RuntimePlanUtils.h"
+#include "RuntimePlanBinaryWriter.h"
 #include "hecate/Dialect/Dist/IR/DistOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -117,8 +118,8 @@ uint64_t peakResidentBytes() {
 // I/O and hashing, so each output byte enters the digest exactly once.
 class JsonFileBuffer : public std::streambuf {
 public:
-  JsonFileBuffer(const std::filesystem::path &path, bool profile)
-      : file(path, std::ios::binary | std::ios::trunc), profile(profile) {
+  JsonFileBuffer(const std::filesystem::path &path, bool profile, bool hashSource = true)
+      : file(path, std::ios::binary | std::ios::trunc), profile(profile), hashSource(hashSource) {
     setp(buffer.data(), buffer.data() + buffer.size());
   }
   bool isOpen() const { return file.is_open(); }
@@ -132,7 +133,7 @@ public:
       writeSeconds += elapsed(start);
     good &= !file.fail();
     closed = true;
-    if (good) {
+    if (good && hashSource) {
       const auto digest = hash.final();
       digestString =
           "sha256:" + llvm::toHex(llvm::ArrayRef<uint8_t>(digest), true);
@@ -155,8 +156,8 @@ private:
     if (!file)
       return false;
     start = profile ? Clock::now() : Clock::time_point{};
-    hash.update(llvm::StringRef(pbase(), count));
-    if (profile)
+    if (hashSource) hash.update(llvm::StringRef(pbase(), count));
+    if (profile && hashSource)
       hashSeconds += elapsed(start);
     bytes += static_cast<uint64_t>(count);
     setp(buffer.data(), buffer.data() + buffer.size());
@@ -187,7 +188,7 @@ private:
   std::ofstream file;
   std::array<char, 64 * 1024> buffer;
   llvm::SHA256 hash;
-  bool profile, closed = false, good = true;
+  bool profile, hashSource, closed = false, good = true;
 };
 
 class JsonArtifact {
@@ -196,9 +197,9 @@ private:
   bool opened = false, published = false;
 
 public:
-  JsonArtifact(std::filesystem::path path, bool profile)
+  JsonArtifact(std::filesystem::path path, bool profile, bool hashSource = true)
       : path(std::move(path)), temporary(this->path.string() + ".tmp"),
-        buffer(temporary, profile), output(&buffer) {}
+        buffer(temporary, profile, hashSource), output(&buffer) {}
   ~JsonArtifact() {
     buffer.close();
     if (!published && opened) {
@@ -283,6 +284,8 @@ public:
     output << ']';
   }
   void finish() { output << (pretty ? "\n}\n" : "}\n"); }
+  bool good() const { return output.good(); }
+  std::string error() const { return "failed to write JSON plan"; }
   double serializationSeconds = 0;
 
 private:
@@ -314,10 +317,10 @@ private:
 class PlaintextBundleWriter {
 public:
   PlaintextBundleWriter(std::filesystem::path directory, std::string id,
-                        bool profile, bool packed)
+                        bool profile, bool packed, bool binaryManifest = false)
       : directory(std::move(directory)),
         staging(this->directory.string() + ".tmp"), id(std::move(id)),
-        profile(profile), packed(packed) {}
+        profile(profile), packed(packed), binaryManifest(binaryManifest) {}
 
   ~PlaintextBundleWriter() {
     if (pack.is_open())
@@ -445,30 +448,41 @@ public:
         return failure();
       }
     }
-    JsonArtifact artifact(staging / "manifest.json", profile);
+    JsonArtifact artifact(staging / (binaryManifest ? "manifest.bin" : "manifest.json"), profile, !binaryManifest);
     if (failed(artifact.checkOpen(op)))
       return failure();
-    JsonStreamWriter writer(artifact.output, false, profile);
-    writer.field("bundle_format_version", packed ? 2 : 1);
-    writer.field("bundle_id", id);
-    writer.field("version", 1);
-    if (packed)
-      writer.field("pack_byte_length", blobBytes);
-    writer.beginArray("blobs");
-    for (const auto &[content, blob] : blobs) {
-      Json entry{{"content", content}, {"byte_length", blob.length}};
+    if (binaryManifest) {
+      BinaryFields writer(artifact.output);
+      writer.header("CKKSMF01", Json{{"bundle_format_version", 2}, {"bundle_id", id},
+                                   {"version", 1}, {"pack_byte_length", blobBytes}, {"blobs", Json::array()}});
+      writer.number<uint64_t>(blobs.size());
+      for (const auto &[content, blob] : blobs) {
+        writer.digest(content); writer.number(blob.offset); writer.number(blob.length);
+      }
+    } else {
+      JsonStreamWriter writer(artifact.output, false, profile);
+      writer.field("bundle_format_version", packed ? 2 : 1);
+      writer.field("bundle_id", id);
+      writer.field("version", 1);
       if (packed)
-        entry["offset"] = blob.offset;
-      writer.record(entry);
+        writer.field("pack_byte_length", blobBytes);
+      writer.beginArray("blobs");
+      for (const auto &[content, blob] : blobs) {
+        Json entry{{"content", content}, {"byte_length", blob.length}};
+        if (packed)
+          entry["offset"] = blob.offset;
+        writer.record(entry);
+      }
+      writer.endArray();
+      writer.finish();
     }
-    writer.endArray();
-    writer.finish();
     if (failed(artifact.finish(op)) || failed(artifact.publish(op)))
       return failure();
     manifestDigest = artifact.buffer.digestString;
     manifestBytes = artifact.buffer.bytes;
     if (profile)
       manifestSeconds = elapsed(start);
+    if (binaryManifest) return Json{{"id", id}, {"version", 1}, {"manifest_format", "binary"}};
     return Json{
         {"id", id}, {"version", 1}, {"manifest_sha256", manifestDigest}};
   }
@@ -485,10 +499,19 @@ public:
       // Reusing a published bundle requires its exact manifest and every blob
       // to match. Replacing a different bundle requires a new output prefix.
       const auto start = profile ? Clock::now() : Clock::time_point{};
-      auto existingDigest = fileDigest(directory / "manifest.json", op);
-      if (failed(existingDigest))
-        return failure();
-      if (*existingDigest != manifestDigest)
+      FailureOr<std::string> existingDigest = std::string{};
+      if (!binaryManifest) {
+        existingDigest = fileDigest(directory / "manifest.json", op);
+        if (failed(existingDigest)) return failure();
+      }
+      if (binaryManifest) {
+        std::ifstream oldManifest(directory / "manifest.bin", std::ios::binary),
+            newManifest(staging / "manifest.bin", std::ios::binary);
+        const std::string oldBytes((std::istreambuf_iterator<char>(oldManifest)), {}),
+            newBytes((std::istreambuf_iterator<char>(newManifest)), {});
+        if (!oldManifest || !newManifest || oldBytes != newBytes)
+          return op->emitError("existing binary manifest differs; use a new prefix");
+      } else if (*existingDigest != manifestDigest)
         return op->emitError("existing plaintext bundle has a different "
                              "manifest; use a new prefix");
       if (packed) {
@@ -567,7 +590,7 @@ private:
   }
   std::filesystem::path directory, staging;
   std::string id, manifestDigest;
-  bool profile, packed, stagingOwned = false, publishedNew = false;
+  bool profile, packed, binaryManifest, stagingOwned = false, publishedNew = false;
   std::ofstream pack;
   struct Blob {
     uint64_t length, offset;
@@ -639,7 +662,7 @@ struct RuntimePlanBuilder {
         bootImplementation(bootImplementation), bundle(bundle),
         inlinePayloadMaxBytes(inlinePayloadMaxBytes), profile(profile) {}
 
-  LogicalResult write(JsonStreamWriter &writer) {
+  template<class Writer> LogicalResult write(Writer &writer) {
     if (!func.getBody().hasOneBlock())
       return func.emitError(
           "RuntimePlan export currently requires a single-block function");
@@ -967,6 +990,17 @@ struct EmitRuntimePlanPass
       return;
     }
 
+    const bool binary = planFormat == "binary";
+    if (planFormat != "json" && !binary) {
+      func.emitError("plan-format must be binary or json");
+      signalPassFailure();
+      return;
+    }
+    if (binary && (bundleFormat != "pack" || pretty)) {
+      func.emitError("binary plans require bundle-format=pack and pretty=false");
+      signalPassFailure();
+      return;
+    }
     if (bundleFormat != "pack" && bundleFormat != "files") {
       func.emitError("bundle-format must be pack or files");
       signalPassFailure();
@@ -1004,8 +1038,8 @@ struct EmitRuntimePlanPass
     });
     const auto exportStart = Clock::now();
     const auto rssStart = residentBytes();
-    JsonArtifact artifact(artifactStem + ".runtime-plan.json",
-                          reportIo.getValue());
+    JsonArtifact artifact(artifactStem + (binary ? ".runtime-plan.bin" : ".runtime-plan.json"),
+                          reportIo.getValue(), !binary);
     if (failed(artifact.checkOpen(func))) {
       signalPassFailure();
       return;
@@ -1013,44 +1047,54 @@ struct EmitRuntimePlanPass
     PlaintextBundleWriter bundle(artifactStem + ".bundle",
                                  "runtime-plan-" + planId.getValue() + "-" +
                                      func.getName().str() + "-plaintexts",
-                                 reportIo.getValue(), bundleFormat == "pack");
+                                 reportIo.getValue(), bundleFormat == "pack", binary);
     if (failed(bundle.initialize(func))) {
       signalPassFailure();
       return;
     }
-    JsonStreamWriter writer(artifact.output, pretty.getValue(),
-                            reportIo.getValue());
-    writer.field("format_version", version3 ? 3 : (version2 ? 2 : 1));
-    writer.field("plan_id", planId.getValue());
-    writer.field("target",
-                 {{"target_id", targetId.getValue()},
-                  {"capability_version", capabilityVersion.getValue()},
-                  {"operator_spec",
-                   {{"id", operatorSpecId.getValue()},
-                    {"version", operatorSpecVersion.getValue()},
-                    {"source_sha256", operatorSpecSha256.getValue()}}},
-                  {"world_size", worldSize},
-                  {"device_counts", emittedDeviceCounts}});
     RuntimePlanBuilder builder(
         func, contextId.getValue(), ntt.getValue(), bootProfile.getValue(),
         bootImplementation.getValue(), bundle,
         static_cast<uint64_t>(inlinePayloadMaxBytes.getValue()),
         reportIo.getValue());
-    const auto buildStart = Clock::now();
-    if (failed(builder.write(writer))) {
-      signalPassFailure();
-      return;
-    }
-    const double buildSeconds = elapsed(buildStart);
-    if (bundle.used()) {
-      auto reference = bundle.writeManifest(func);
-      if (failed(reference)) {
-        signalPassFailure();
-        return;
+    double buildSeconds = 0, serializationSeconds = 0;
+    auto emit = [&](auto &writer) -> LogicalResult {
+      writer.field("format_version", version3 ? 3 : (version2 ? 2 : 1));
+      writer.field("plan_id", planId.getValue());
+      writer.field("target",
+                   {{"target_id", targetId.getValue()},
+                    {"capability_version", capabilityVersion.getValue()},
+                    {"operator_spec",
+                     {{"id", operatorSpecId.getValue()},
+                      {"version", operatorSpecVersion.getValue()},
+                      {"source_sha256", operatorSpecSha256.getValue()}}},
+                    {"world_size", worldSize},
+                    {"device_counts", emittedDeviceCounts}});
+      const auto buildStart = Clock::now();
+      if (failed(builder.write(writer))) {
+        return failure();
       }
-      writer.field("plaintext_bundle", *reference);
+      buildSeconds = elapsed(buildStart);
+      if (bundle.used()) {
+        auto reference = bundle.writeManifest(func);
+        if (failed(reference)) {
+          return failure();
+        }
+        writer.field("plaintext_bundle", *reference);
+      }
+      writer.finish();
+      if (!writer.good())
+        return func.emitError(writer.error());
+      serializationSeconds = writer.serializationSeconds;
+      return success();
+    };
+    if (binary) {
+      BinaryPlanWriter writer(artifact.output, artifactStem + ".records.tmp");
+      if (failed(emit(writer))) { signalPassFailure(); return; }
+    } else {
+      JsonStreamWriter writer(artifact.output, pretty.getValue(), reportIo.getValue());
+      if (failed(emit(writer))) { signalPassFailure(); return; }
     }
-    writer.finish();
     if (failed(artifact.finish(func))) {
       signalPassFailure();
       return;
@@ -1069,7 +1113,7 @@ struct EmitRuntimePlanPass
       report.update({{"export_seconds", elapsed(exportStart)},
                      {"layout_seconds", builder.layoutSeconds},
                      {"build_seconds", buildSeconds},
-                     {"plan_serialize_seconds", writer.serializationSeconds},
+                     {"plan_serialize_seconds", binary ? Json(nullptr) : Json(serializationSeconds)},
                      {"plan_write_seconds", artifact.buffer.writeSeconds},
                      {"plan_hash_seconds", artifact.buffer.hashSeconds},
                      {"plan_bytes", artifact.buffer.bytes},
@@ -1079,7 +1123,7 @@ struct EmitRuntimePlanPass
                      {"rss_start_bytes", rssStart},
                      {"rss_end_bytes", residentBytes()},
                      {"process_peak_rss_bytes", peakResidentBytes()},
-                     {"pretty", pretty.getValue()}});
+                     {"pretty", pretty.getValue()}, {"plan_format", planFormat.getValue()}});
       llvm::errs() << "runtime-plan-io " << report.dump() << '\n';
     }
   }

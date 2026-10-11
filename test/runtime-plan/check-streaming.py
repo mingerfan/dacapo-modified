@@ -65,7 +65,7 @@ def main():
             prefix = temp / 'out'
             passes = [f'plan-plaintext-streaming{{operator-spec={spec} prefix={prefix} gpu-budget-bytes={gpu} host-budget-bytes={host} pinned-budget-bytes={pinned} raw-budget-bytes={raw} prefetch-bytes={prefetch}}}',
                       'plan-runtime-memory{enable-reuse=false}',
-                      f'emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{"0"*64} context-id=test-context}}']
+                      f'emit-runtime-plan{{plan-format=json prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{"0"*64} context-id=test-context}}']
             result = subprocess.run([str(args.hecate_opt), str(path), f'-p=builtin.module(func.func({",".join(passes)}))', '-o', str(temp/'out.mlir')], capture_output=True, text=True, timeout=90, cwd=args.source_dir)
             if result.returncode:
                 return result.stderr
@@ -92,7 +92,7 @@ def main():
         fence = temp / 'fence.mlir'
         fence.write_text(source(1).replace('return %v0', '"dist.fence"() : () -> ()\nreturn %v0'))
         subprocess.run([str(args.hecate_opt), str(fence),
-            f'-p=builtin.module(func.func(canonicalize,cse,emit-runtime-plan{{prefix={temp}/fence target-id=test operator-spec-id=test operator-spec-sha256=sha256:{"0"*64} context-id=test-context}}))',
+            f'-p=builtin.module(func.func(canonicalize,cse,emit-runtime-plan{{plan-format=json prefix={temp}/fence target-id=test operator-spec-id=test operator-spec-sha256=sha256:{"0"*64} context-id=test-context}}))',
             '-o', str(temp/'fence.out.mlir')], cwd=args.source_dir, check=True, capture_output=True)
         emitted = json.loads((temp/'fence.stream.runtime-plan.json').read_text())
         assert emitted['format_version'] == 3

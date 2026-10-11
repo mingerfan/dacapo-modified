@@ -20,7 +20,7 @@ def main():
         def compile(fixture, passes, name):
             prefix = temp / name
             estimate = f"estimate-runtime-memory{{prefix={prefix} operator-spec={fixtures / 'placement-operator-spec.json'}}}"
-            emit = f"emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context}}"
+            emit = f"emit-runtime-plan{{plan-format=json prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context}}"
             output = temp / (name + ".mlir")
             subprocess.run(
                 [

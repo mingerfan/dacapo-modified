@@ -6,7 +6,7 @@
 include "mlir/Pass/PassBase.td"
 
 def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
-  let summary = "Emit a Host or placed RuntimePlan V1 JSON file";
+  let summary = "Emit a Host or placed RuntimePlan binary or diagnostic JSON file";
   let description = [{
     Serializes a linear CKKS function to RuntimePlan V1. Unplaced functions use
     Host rank 0. Placed functions preserve rank/device assignments and explicit
@@ -41,6 +41,8 @@ def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
     Option<"inlinePayloadMaxBytes", "inline-payload-max-bytes", "int64_t",
            /*default=*/[{4096}],
            "Largest Encode payload kept inline; larger float64 payloads use a bundle">,
+    Option<"planFormat", "plan-format", "std::string", /*default=*/[{"binary"}],
+           "RuntimePlan format: binary or json">,
     Option<"bundleFormat", "bundle-format", "std::string", /*default=*/[{"pack"}],
            "Plaintext bundle storage: pack (one data.bin) or files">,
     Option<"pretty", "pretty", "bool", /*default=*/[{false}],

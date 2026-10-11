@@ -42,7 +42,7 @@ def compile_plan(binary, fixtures, source, directory, devices, reuse):
               "materialize-ckks-communication",
               f"plan-runtime-memory{{enable-reuse={'true' if reuse else 'false'}}}",
               f"estimate-runtime-memory{{prefix={prefix} operator-spec={fixtures / 'placement-operator-spec.json'}}}",
-              f"emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context boot-profile=test-boot boot-implementation=decrypt_reencrypt}}"]
+              f"emit-runtime-plan{{plan-format=json prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context boot-profile=test-boot boot-implementation=decrypt_reencrypt}}"]
     result = subprocess.run([str(binary), str(source), f"-p=builtin.module(func.func({','.join(passes)}))",
                     "-o", str(directory / "out.mlir")], cwd=fixtures.parent.parent,
                    timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

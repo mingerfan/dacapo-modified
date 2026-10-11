@@ -147,3 +147,7 @@ the removed HEVM runner.
   USENIX Security 2023.
 - HECATE: Performance-Aware Scale Optimization for Homomorphic Encryption
   Compiler, CGO 2022.
+
+### RuntimePlan output formats
+
+RuntimePlan export defaults to binary: `.runtime-plan.bin`, a packed bundle with `manifest.bin` and `data.bin`. Use `--runtime-plan-format=json --runtime-plan-pretty=true` when you need readable instructions; the pass option is `plan-format=json`. Binary mode uses `plan-format=binary`, requires pack storage, and writes a versioned little-endian header (`CKKSPL01`, u32 container version, u32 metadata length, small metadata JSON). Manifest magic is `CKKSMF01`. Semantic plan V1/V2/V3 is separate from container version. The writer preserves the same IDs, instruction ordering, and memory scheduling. Use separate output prefixes for JSON and binary artifacts.

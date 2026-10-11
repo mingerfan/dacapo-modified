@@ -67,7 +67,7 @@ def main():
             subprocess.run([
                 str(args.hecate_opt), "--dacapo", "--boot-placement=depth-dp",
                 f"--ckks-config={profile}", "--waterline=40", "--mlir-disable-threading",
-                "--runtime-plan-id=1", "--runtime-plan-target-id=test",
+                "--runtime-plan-id=1", "--runtime-plan-format=json", "--runtime-plan-target-id=test",
                 "--runtime-plan-context-id=test", "--runtime-plan-operator-spec-id=test",
                 "--runtime-plan-operator-spec-version=1",
                 "--runtime-plan-operator-spec-sha256=sha256:" + "0" * 64,

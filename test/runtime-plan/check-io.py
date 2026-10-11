@@ -29,7 +29,7 @@ def main():
                        f"operator-spec-sha256=sha256:{'0' * 64} context-id=test-context "
                        f"pretty={'true' if pretty else 'false'} report-io=true")
             result = subprocess.run([str(args.hecate_opt), str(ir),
-                                     f"-p=builtin.module(func.func(emit-runtime-plan{{{options}}}))",
+                                     f"-p=builtin.module(func.func(emit-runtime-plan{{plan-format=json {options}}}))",
                                      "-o", "/dev/null"], cwd=args.source_dir,
                                     check=True, capture_output=True, text=True)
             path = Path(f"{artifact_prefix}.bundle_reuse.runtime-plan.json")
@@ -83,7 +83,7 @@ def main():
         temporary = Path(str(output) + ".tmp")
         temporary.mkdir()
         result = subprocess.run([str(args.hecate_opt), str(ir),
-                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=files}}))",
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{plan-format=json prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=files}}))",
                                  "-o", "/dev/null"], cwd=args.source_dir,
                                 capture_output=True, text=True)
         assert result.returncode != 0 and "cannot open output file" in result.stderr
@@ -95,7 +95,7 @@ def main():
         original_blob = blob.read_bytes()
         blob.write_bytes(bytes([original_blob[0] ^ 1]) + original_blob[1:])
         result = subprocess.run([str(args.hecate_opt), str(ir),
-                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=files}}))",
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{plan-format=json prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=files}}))",
                                  "-o", "/dev/null"], cwd=args.source_dir,
                                 capture_output=True, text=True)
         assert result.returncode != 0 and "existing bundle blob SHA-256 mismatch" in result.stderr
@@ -111,13 +111,13 @@ def main():
         bad.write_text(text[:index] + text[index:].replace('"ckks.encode"', '"test.unsupported"', 1))
         bad_prefix = temp / "failed"
         result = subprocess.run([str(args.hecate_opt), str(bad), "--allow-unregistered-dialect",
-                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={bad_prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=files}}))",
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{plan-format=json prefix={bad_prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=files}}))",
                                  "-o", "/dev/null"], cwd=args.source_dir,
                                 capture_output=True, text=True)
         assert result.returncode != 0 and "unsupported operation" in result.stderr
         assert not list(temp.glob("failed.*"))
         result = subprocess.run([str(args.hecate_opt), str(bad), "--allow-unregistered-dialect",
-                                 f"-p=builtin.module(func.func(emit-runtime-plan{{prefix={bad_prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=pack}}))",
+                                 f"-p=builtin.module(func.func(emit-runtime-plan{{plan-format=json prefix={bad_prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{'0' * 64} context-id=test-context bundle-format=pack}}))",
                                  "-o", "/dev/null"], cwd=args.source_dir,
                                 capture_output=True, text=True)
         assert result.returncode != 0 and "unsupported operation" in result.stderr

@@ -311,6 +311,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       "runtime-plan-inline-payload-max-bytes",
       cl::desc("Largest RuntimePlan Encode payload kept inline"),
       cl::init(4096)};
+  static cl::opt<std::string> runtime_plan_format{
+      "runtime-plan-format", cl::desc("RuntimePlan format: binary or json"), cl::init("binary")};
   static cl::opt<std::string> runtime_plan_bundle_format{
       "runtime-plan-bundle-format",
       cl::desc("Plaintext bundle storage: pack or files"), cl::init("pack")};
@@ -413,6 +415,7 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
     options.bootImplementation = runtime_plan_boot_implementation;
     options.inlinePayloadMaxBytes = runtime_plan_inline_payload_max_bytes;
     options.bundleFormat = runtime_plan_bundle_format;
+    options.planFormat = runtime_plan_format;
     options.pretty = runtime_plan_pretty;
     options.reportIo = runtime_plan_report_io;
     pm.addNestedPass<func::FuncOp>(

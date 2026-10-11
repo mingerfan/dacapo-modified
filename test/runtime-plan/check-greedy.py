@@ -151,7 +151,7 @@ def main():
             traced.write_text(text)
             command = [str(args.hecate_opt), "--dacapo", f"--boot-placement={strategy}",
                        f"--ckks-config={profile}", "--waterline=40",
-                       "--mlir-disable-threading", "--mlir-timing", "--runtime-plan-id=1",
+                       "--mlir-disable-threading", "--mlir-timing", "--runtime-plan-id=1", "--runtime-plan-format=json",
                        "--runtime-plan-target-id=test", "--runtime-plan-context-id=test",
                        "--runtime-plan-operator-spec-id=test", "--runtime-plan-operator-spec-version=1",
                        "--runtime-plan-operator-spec-sha256=sha256:" + "0" * 64,

@@ -34,7 +34,7 @@ def run_pipeline(hecate_opt: Path, source_dir: Path, temp: Path,
             "boot-profile=test-boot",
             "boot-implementation=native",
         ])
-    passes = ",".join(conversions + [f"emit-runtime-plan{{{' '.join(options)}}}"])
+    passes = ",".join(conversions + [f"emit-runtime-plan{{plan-format=json {' '.join(options)}}}"])
     output_mlir = temp / f"{fixture}.ckks.mlir"
     subprocess.run(
         [
@@ -106,7 +106,7 @@ def run_placement_pipeline(hecate_opt: Path, source_dir: Path, temp: Path,
         f"{communication_option}}}"
     )
     emit = (
-        "emit-runtime-plan{"
+        "emit-runtime-plan{plan-format=json "
         f"prefix={prefix} plan-id={plan_id} "
         "target-id=dacapo-placement-test capability-version=1 "
         "operator-spec-id=dacapo-placement-test-v1 "

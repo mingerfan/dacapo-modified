@@ -130,7 +130,7 @@ def main():
                 passes += ['convert-earth-to-ckks', 'convert-upscale-to-mulcp']
                 if optimized:
                     passes += ['cse', 'canonicalize']
-                passes += ['emit-runtime-plan{' + f'prefix={prefix} plan-id=1 target-id=test '
+                passes += ['emit-runtime-plan{plan-format=json ' + f'prefix={prefix} plan-id=1 target-id=test '
                            'capability-version=1 operator-spec-id=test operator-spec-version=1 '
                            'operator-spec-sha256=sha256:' + '0'*64 +
                            ' context-id=test device-count=0 ntt=true}']
