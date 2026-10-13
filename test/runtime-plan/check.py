@@ -384,7 +384,7 @@ def main() -> None:
         )
         physical_levels = (
             "materialize-ckks-physical-levels{"
-            f"operator-spec={lazy_spec} levels-per-logical-level=4}}"
+            f"operator-spec={lazy_spec} levels-per-logical-level=5}}"
         )
         lazy_placement = (
             "assign-ckks-placement{"
@@ -399,7 +399,7 @@ def main() -> None:
              "materialize-ckks-communication"],
         )
         assert [value(lazy, str(index))["level"] for index in range(3)] == [
-            13, 9, 5
+            49, 44, 4
         ]
         lazy_computes = [
             instruction for instruction in lazy["execution"]
@@ -409,18 +409,18 @@ def main() -> None:
             "rescale", "mod_switch"
         ]
         assert lazy_computes[0]["attrs"] == {
-            "target_level": 9,
-            "target_scale_log2": 40,
+            "target_level": 44,
+            "target_scale_log2": 120,
         }
-        assert lazy_computes[1]["attrs"] == {"target_level": 5}
+        assert lazy_computes[1]["attrs"] == {"target_level": 4}
 
         lazy_mlir = lazy_mlir_path.read_text(encoding="utf-8")
-        assert "ckks.logical_init_level = 5 : i64" in lazy_mlir
-        assert "ckks.levels_per_logical_level = 4 : i64" in lazy_mlir
-        assert "init_level = 13 : i64" in lazy_mlir
-        assert "downFactor = 4 : i64" in lazy_mlir
-        for op_name, expected_duration in (("rescalec", 113),
-                                           ("modswitchc", 209)):
+        assert "ckks.logical_init_level = 9 : i64" in lazy_mlir
+        assert "ckks.levels_per_logical_level = 5 : i64" in lazy_mlir
+        assert "init_level = 49 : i64" in lazy_mlir
+        assert "downFactor = 40 : i64" in lazy_mlir
+        for op_name, expected_duration in (("rescalec", 149),
+                                           ("modswitchc", 244)):
             line = next(
                 line for line in lazy_mlir.splitlines()
                 if f'"ckks.{op_name}"' in line
@@ -433,17 +433,48 @@ def main() -> None:
             ).group(1))
             assert finish - start == expected_duration
 
-        for fixture, expected_error in (
+        lazy_multi, _ = run_pipeline(
+            args.hecate_opt, args.source_dir, temp,
+            "lazy-physical-levels-multi", "lazy_physical_levels_multi", 80,
+            [physical_levels],
+        )
+        assert [value(lazy_multi, str(index))["level"] for index in range(2)] == [
+            49, 34
+        ]
+        assert lazy_multi["execution"][0]["attrs"] == {
+            "target_level": 34,
+            "target_scale_log2": 120,
+        }
+
+        limited_spec = temp / "lazy-limited-rescale-spec.json"
+        limited_profile = json.loads(lazy_spec.read_text())
+        limited_profile["operators"]["rescale"]["max_levels_per_op"] = 14
+        limited_spec.write_text(json.dumps(limited_profile))
+        limited_physical_levels = (
+            "materialize-ckks-physical-levels{"
+            f"operator-spec={limited_spec} levels-per-logical-level=5}}"
+        )
+        for fixture, materialization, expected_error in (
             ("lazy-physical-levels-invalid-scale",
-             "scale drop does not match the target physical modulus bits"),
+             physical_levels,
+             "requires at least 30 extra nominal modulus bits"),
             ("lazy-physical-levels-underflow",
+             physical_levels,
              "requires a physical level below the OperatorSpec lower_bound"),
+            ("lazy-physical-levels-invalid-remaining-modulus",
+             physical_levels,
+             "target scale must be below the remaining nominal modulus bits"),
+            ("lazy-physical-levels", physical_levels.replace(
+                "levels-per-logical-level=5", "levels-per-logical-level=4"),
+             "requires at least 30 extra nominal modulus bits"),
+            ("lazy-physical-levels-multi", limited_physical_levels,
+             "level drop is outside the target OperatorSpec capability"),
         ):
             failed_materialization = subprocess.run(
                 [
                     str(args.hecate_opt),
                     str(args.source_dir / f"test/runtime-plan/{fixture}.mlir"),
-                    f"-p=builtin.module(func.func({physical_levels}))",
+                    f"-p=builtin.module(func.func({materialization}))",
                     "-o", str(temp / f"{fixture}.mlir"),
                 ],
                 cwd=args.source_dir,

@@ -296,11 +296,30 @@ struct MaterializePhysicalLevelsPass
         uint64_t modulusDrop = 0;
         for (uint64_t level = *resultLevel + 1; level <= *sourceLevel; ++level)
           modulusDrop += spec->modulusBits[level];
-        if (sourceType.getScaleLog2() < resultType.getScaleLog2() ||
-            static_cast<uint64_t>(sourceType.getScaleLog2() -
-                                  resultType.getScaleLog2()) != modulusDrop) {
-          op->emitError("logical Rescale scale drop does not match the target "
-                        "physical modulus bits");
+        if (sourceType.getScaleLog2() < resultType.getScaleLog2()) {
+          op->emitError("logical Rescale scale drop must be nonnegative");
+          return WalkResult::interrupt();
+        }
+        const uint64_t scaleDrop = static_cast<uint64_t>(
+            sourceType.getScaleLog2() - resultType.getScaleLog2());
+        // Exact power-of-two scale metadata requires a real integer
+        // coefficient multiplication after native rescaling. The extra 30
+        // nominal bits leave room for a large enough rounding factor; the
+        // backend must still check actual primes and the resulting error.
+        constexpr uint64_t integerAlignmentBits = 30;
+        if (modulusDrop < scaleDrop ||
+            modulusDrop - scaleDrop < integerAlignmentBits) {
+          op->emitError("physical Rescale requires at least 30 extra nominal "
+                        "modulus bits for integer scale alignment");
+          return WalkResult::interrupt();
+        }
+        uint64_t remainingModulusBits = 0;
+        for (uint64_t level = 0; level <= *resultLevel; ++level)
+          remainingModulusBits += spec->modulusBits[level];
+        if (static_cast<uint64_t>(resultType.getScaleLog2()) >=
+            remainingModulusBits) {
+          op->emitError("physical Rescale target scale must be below the "
+                        "remaining nominal modulus bits");
           return WalkResult::interrupt();
         }
       } else if (auto modswitch = dyn_cast<ckks::ModswitchCOp>(op)) {
