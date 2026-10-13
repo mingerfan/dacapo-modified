@@ -750,6 +750,12 @@ private:
                   {"payload", std::move(*payload)},
                   {"output", std::to_string(outputId)}};
     }
+    if (auto prepare = dyn_cast<dist::PreparePlainOp>(op)) {
+      auto payload = encodePayload(prepare.getPayload(), &op, bundle, inlinePayloadMaxBytes);
+      if (failed(payload)) return failure();
+      return Json{{"kind", "prepare_plaintext"}, {"payload", std::move(*payload)},
+                  {"output", std::to_string(outputId)}};
+    }
     if (auto transfer = dyn_cast<dist::TransferOp>(op)) {
       FailureOr<std::string> inputId = valueId(transfer.getInput(), &op);
       if (failed(inputId))
@@ -1030,11 +1036,12 @@ struct EmitRuntimePlanPass
     const std::string artifactStem =
         prefix.getValue() + "." + func.getName().str();
     bool version2 = func->hasAttr("runtime.memory_planned");
-    bool version3 = func->hasAttr("runtime.streaming");
+    bool version3 = false;
+    bool version4 = func->hasAttr("runtime.waterline");
     func.walk([&](Operation *op) {
       version2 |=
           isa<dist::ReleaseOp>(op) || op->hasAttr("runtime.reuse_input");
-      version3 |= isa<dist::FenceOp>(op) || op->hasAttr("runtime.streaming");
+      version3 |= isa<dist::FenceOp>(op) || op->hasAttr("runtime.online_encode");
     });
     const auto exportStart = Clock::now();
     const auto rssStart = residentBytes();
@@ -1059,7 +1066,11 @@ struct EmitRuntimePlanPass
         reportIo.getValue());
     double buildSeconds = 0, serializationSeconds = 0;
     auto emit = [&](auto &writer) -> LogicalResult {
-      writer.field("format_version", version3 ? 3 : (version2 ? 2 : 1));
+      writer.field("format_version", version4 ? 4 : version3 ? 3 : (version2 ? 2 : 1));
+      if (version4) {
+        auto c = func->getAttrOfType<StringAttr>("runtime.waterline");
+        writer.field("waterline", Json::parse(c.getValue().str()));
+      }
       writer.field("plan_id", planId.getValue());
       writer.field("target",
                    {{"target_id", targetId.getValue()},

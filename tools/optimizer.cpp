@@ -331,13 +331,16 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       "runtime-plan-memory-report", cl::desc("Write per-place object memory estimates"), cl::init(false)};
 
   static cl::opt<std::string> runtime_plan_plaintext_schedule{
-      "runtime-plan-plaintext-schedule", cl::desc("eager or stream"), cl::init("eager")};
+      "runtime-plan-plaintext-schedule", cl::desc("eager or waterline"), cl::init("eager")};
   static cl::opt<uint64_t> runtime_plan_gpu_budget{"runtime-plan-gpu-budget-bytes", cl::init(0)};
   static cl::opt<uint64_t> runtime_plan_host_budget{"runtime-plan-host-budget-bytes", cl::init(0)};
   static cl::opt<uint64_t> runtime_plan_pinned_budget{"runtime-plan-pinned-budget-bytes", cl::init(0)};
   static cl::opt<uint64_t> runtime_plan_raw_budget{"runtime-plan-raw-budget-bytes", cl::init(0)};
   static cl::opt<uint64_t> runtime_plan_workspace{"runtime-plan-workspace-bytes-per-op", cl::init(0)};
-  static cl::opt<uint64_t> runtime_plan_prefetch{"runtime-plan-prefetch-bytes", cl::init(0)};
+  static cl::opt<uint64_t> runtime_plan_reserve{"runtime-plan-reserve-bytes", cl::init(0)};
+  static cl::opt<double> runtime_plan_fraction{"runtime-plan-waterline-fraction", cl::init(0.5)};
+  static cl::opt<std::string> runtime_plan_backend{"runtime-plan-prepare-backend", cl::init("cpu")};
+  static cl::opt<uint64_t> runtime_plan_lookahead{"runtime-plan-lookahead-groups", cl::init(8)};
 
   auto addRuntimePlanExport = [&](OpPassManager &pm,
                                   const std::string &artifactPrefix) {
@@ -376,11 +379,11 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       estimate.reportTag = tag;
       pm.addNestedPass<func::FuncOp>(hecate::ckks::createEstimateRuntimeMemory(estimate));
     };
-    if (runtime_plan_plaintext_schedule != "eager" && runtime_plan_plaintext_schedule != "stream")
-      llvm::report_fatal_error("runtime-plan-plaintext-schedule must be eager or stream");
-    const bool streaming = runtime_plan_plaintext_schedule == "stream";
-    if (streaming) {
-      hecate::ckks::PlanPlaintextStreamingOptions stream;
+    if (runtime_plan_plaintext_schedule != "eager" && runtime_plan_plaintext_schedule != "waterline")
+      llvm::report_fatal_error("runtime-plan-plaintext-schedule must be eager or waterline");
+    const bool waterline = runtime_plan_plaintext_schedule == "waterline";
+    if (waterline) {
+      hecate::ckks::PlanPlaintextWaterlineOptions stream;
       stream.operatorSpecPath = runtime_plan_physical_level_operator_spec_path.empty()
           ? runtime_plan_operator_spec_path.getValue()
           : runtime_plan_physical_level_operator_spec_path.getValue();
@@ -390,11 +393,14 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       stream.pinnedBudget = runtime_plan_pinned_budget;
       stream.rawBudget = runtime_plan_raw_budget;
       stream.workspaceBytes = runtime_plan_workspace;
-      stream.prefetchBytes = runtime_plan_prefetch;
-      pm.addNestedPass<func::FuncOp>(hecate::ckks::createPlanPlaintextStreaming(stream));
+      stream.reserveBytes = runtime_plan_reserve;
+      stream.fraction = runtime_plan_fraction;
+      stream.backend = runtime_plan_backend;
+      stream.lookaheadGroups = runtime_plan_lookahead;
+      pm.addNestedPass<func::FuncOp>(hecate::ckks::createPlanPlaintextWaterline(stream));
     }
-    if (runtime_plan_memory_report && runtime_plan_memory && !streaming) addMemoryReport("before");
-    if (runtime_plan_memory || streaming) {
+    if (runtime_plan_memory_report && runtime_plan_memory && !waterline) addMemoryReport("before");
+    if (runtime_plan_memory || waterline) {
       hecate::ckks::PlanRuntimeMemoryOptions memory;
       memory.enableReuse = runtime_plan_memory_reuse;
       pm.addNestedPass<func::FuncOp>(hecate::ckks::createPlanRuntimeMemory(memory));

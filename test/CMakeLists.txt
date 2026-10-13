@@ -68,8 +68,8 @@ add_test(
           --source-dir ${PROJECT_SOURCE_DIR}
 )
 
-add_test(NAME DacapoPlaintextStreaming
+add_test(NAME DacapoPlaintextWaterline
   COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-streaming.py
+          ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-waterline.py
           --hecate-opt $<TARGET_FILE:hecate-opt>
           --source-dir ${PROJECT_SOURCE_DIR})

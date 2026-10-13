@@ -40,3 +40,15 @@ LogicalResult hecate::dist::ReleaseOp::verify() {
     return emitOpError("input must be a CKKS polynomial value");
   return success();
 }
+
+LogicalResult hecate::dist::PreparePlainOp::verify() {
+  auto type = hecate::ckks::getPolyType(getResult());
+  auto rank = (*this)->getAttrOfType<IntegerAttr>("dist.rank");
+  auto device = (*this)->getAttrOfType<IntegerAttr>("dist.device");
+  if (!type || type.getComponents() != 1 || !rank || rank.getInt() < 0 ||
+      !device || device.getInt() < 0)
+    return emitOpError("requires a plaintext and fixed Device place");
+  if (getPayload().getNumElements() == 0)
+    return emitOpError("requires a nonempty payload");
+  return success();
+}

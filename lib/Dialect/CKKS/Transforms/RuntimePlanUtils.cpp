@@ -10,7 +10,7 @@ namespace hecate::ckks {
 
 bool isRuntimeInitialization(Operation *operation) {
   if (isa<EncodeOp>(operation))
-    return !operation->hasAttr("runtime.streaming");
+    return !operation->hasAttr("runtime.online_encode");
   if (auto transfer = dyn_cast<dist::TransferOp>(operation))
     return transfer.getInitialization();
   if (auto release = dyn_cast<dist::ReleaseOp>(operation))
@@ -97,13 +97,13 @@ FailureOr<RuntimePlanLayout> buildRuntimePlanLayout(func::FuncOp func) {
       return failure();
   }
   for (Operation &operation : func.getBody().front()) {
-    if (auto transfer = dyn_cast<dist::TransferOp>(operation)) {
+    if (isa<dist::TransferOp, dist::PreparePlainOp>(operation)) {
       auto stable = operation.getAttrOfType<IntegerAttr>("runtime.value_id");
       if (stable && stable.getInt() < 0) {
         operation.emitError("invalid RuntimePlan transfer ValueId");
         return failure();
       }
-      if (failed(registerId(transfer.getResult(),
+      if (failed(registerId(operation.getResult(0),
                             stable ? stable.getInt() : nextId)))
         return failure();
     }

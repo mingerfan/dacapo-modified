@@ -230,9 +230,9 @@ private:
   void instruction(const J &r) {
     wire.number<uint64_t>(r.at("ordinal").get<uint64_t>());
     const auto tag = choice(
-        r.at("kind"), {"encode", "compute", "transfer", "release", "fence"});
+        r.at("kind"), {"encode", "compute", "transfer", "release", "fence", "prepare_plaintext"});
     wire.number<uint8_t>(tag);
-    if (tag == 0) {
+    if (tag == 0 || tag == 5) {
       id(r.at("output"));
       const auto &p = r.at("payload");
       const auto payload = choice(p.at("kind"), {"inline", "bundle"});

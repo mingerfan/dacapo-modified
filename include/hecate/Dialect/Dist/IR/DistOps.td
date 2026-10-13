@@ -26,6 +26,13 @@ def TransferOp : Dist_Op<"transfer", [SameOperandsAndResultType]> {
   let hasVerifier = 1;
 }
 
+def PreparePlainOp : Dist_Op<"prepare_plain", [MemoryEffects<[MemAlloc, MemWrite]>]> {
+  let summary = "Prepare a complete NTT plaintext on its fixed target GPU";
+  let arguments = (ins ElementsAttr:$payload);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;
+}
+
 def ReleaseOp : Dist_Op<"release", [MemoryEffects<[MemFree]>]> {
   let summary = "Release the runtime reference after the last use of a CKKS value";
   let arguments = (ins AnyRankedTensor:$input, BoolAttr:$initialization);
@@ -34,7 +41,7 @@ def ReleaseOp : Dist_Op<"release", [MemoryEffects<[MemFree]>]> {
 
 // A scheduling boundary has observable ordering effects even without SSA values.
 def FenceOp : Dist_Op<"fence", [MemoryEffects<[MemRead, MemWrite]>]> {
-  let summary = "Complete this local runtime batch before submitting the next";
+  let summary = "Complete submitted work at an explicit execution boundary";
 }
 
 #endif

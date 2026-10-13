@@ -106,18 +106,21 @@ def MaterializeCommunication : Pass<"materialize-ckks-communication",
   }];
 }
 
-def PlanPlaintextStreaming : Pass<"plan-plaintext-streaming", "::mlir::func::FuncOp"> {
+def PlanPlaintextWaterline : Pass<"plan-plaintext-waterline", "::mlir::func::FuncOp"> {
   let dependentDialects = ["hecate::dist::DistDialect"];
-  let summary = "Schedule bounded local plaintext batches with Fence";
+  let summary = "Rewrite complete Device plaintext preparation after HEFT";
   let options = [
     Option<"operatorSpecPath", "operator-spec", "std::string", [{""}], "Physical OperatorSpec JSON">,
-    Option<"prefix", "prefix", "std::string", [{""}], "Report filename prefix">,
-    Option<"gpuBudget", "gpu-budget-bytes", "uint64_t", [{0}], "Per-GPU RNS object budget after reserves">,
-    Option<"hostBudget", "host-budget-bytes", "uint64_t", [{0}], "Host RNS object budget">,
-    Option<"pinnedBudget", "pinned-budget-bytes", "uint64_t", [{0}], "Batch upload staging budget">,
-    Option<"rawBudget", "raw-budget-bytes", "uint64_t", [{0}], "One raw read plus decoded slots budget">,
-    Option<"workspaceBytes", "workspace-bytes-per-op", "uint64_t", [{0}], "Additional cumulative per-GPU compute reservation">,
-    Option<"prefetchBytes", "prefetch-bytes", "uint64_t", [{0}], "Move batch preparations ahead of compute, bounded by encoded bytes">
+    Option<"prefix", "prefix", "std::string", [{""}], "Capacity report prefix">,
+    Option<"gpuBudget", "gpu-budget-bytes", "uint64_t", [{0}], "Configured total per-GPU capacity">,
+    Option<"reserveBytes", "reserve-bytes", "uint64_t", [{0}], "Keys, tables, allocation overhead and safety reserve">,
+    Option<"fraction", "fraction", "double", [{0.5}], "Plaintext waterline fraction">,
+    Option<"hostBudget", "host-budget-bytes", "uint64_t", [{0}], "Shared Host budget">,
+    Option<"pinnedBudget", "pinned-budget-bytes", "uint64_t", [{0}], "Shared pinned budget">,
+    Option<"rawBudget", "raw-budget-bytes", "uint64_t", [{0}], "Shared raw-data budget">,
+    Option<"workspaceBytes", "workspace-bytes-per-op", "uint64_t", [{0}], "Backend compute workspace upper bound for capacity precheck">,
+    Option<"backend", "backend", "std::string", [{"cpu"}], "cpu, gpu or auto">,
+    Option<"lookaheadGroups", "lookahead-groups", "uint64_t", [{8}], "Maximum admitted consumer groups">
   ];
 }
 

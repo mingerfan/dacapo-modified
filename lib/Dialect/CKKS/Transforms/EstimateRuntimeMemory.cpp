@@ -148,7 +148,7 @@ struct EstimateRuntimeMemoryPass
           }
           aliases.erase(alias);
         } else if (isa<dist::FenceOp>(op)) {
-          // Batch bounds are reported separately by PlanPlaintextStreaming.
+          // Explicit completion boundary; object lifetimes are unchanged.
         } else {
           for (Value operand : op->getOperands())
             if (!aliases.count(layout->ids.lookup(operand)))
