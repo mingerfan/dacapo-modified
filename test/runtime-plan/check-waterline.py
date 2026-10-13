@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent batch-lifetime simulation, equivalence, rejection and scale checks."""
+"""Check rolling Prepare lifetime, placement/order, and complete-group capacity."""
 import argparse
 import json
 import subprocess
@@ -30,8 +30,8 @@ def main():
         temp=Path(d);path=temp/'input.mlir';path.write_text(source(200))
         spec=args.source_dir/'test/runtime-plan/placement-operator-spec.json'
         prefix=temp/'out'
-        def run(budget, fraction=.5, extra=''):
-            passes=[f'plan-plaintext-waterline{{operator-spec={spec} prefix={prefix} gpu-budget-bytes={budget} fraction={fraction} host-budget-bytes=16384 pinned-budget-bytes=8192 raw-budget-bytes=128 {extra}}}',
+        def run(budget, fraction=.5, extra='', host_budget=16384, operator_spec=spec):
+            passes=[f'plan-plaintext-waterline{{operator-spec={operator_spec} prefix={prefix} gpu-budget-bytes={budget} fraction={fraction} host-budget-bytes={host_budget} pinned-budget-bytes=8192 raw-budget-bytes=128 {extra}}}',
                 'plan-runtime-memory{enable-reuse=false}',
                 f'emit-runtime-plan{{plan-format=json prefix={prefix} target-id=test operator-spec-id=test operator-spec-sha256=sha256:{"0"*64} context-id=test-context}}']
             return subprocess.run([str(args.hecate_opt),str(path),f'-p=builtin.module(func.func({",".join(passes)}))','-o',str(temp/'out.mlir')],capture_output=True,text=True,timeout=90,cwd=args.source_dir)
@@ -49,5 +49,28 @@ def main():
         for budget,fraction,extra in [(300,.5,''),(4096,.01,''),(4096,.5,'workspace-bytes-per-op=8192')]:
             bad=run(budget,fraction,extra);assert bad.returncode!=0 and 'single-group' in bad.stderr,bad.stderr
         print('PASS: Prepare V4, no automatic Fence/reencode, frontend places/order, single-group rejections')
+        # A CPU-encoded Host plaintext stays alive while its separate pinned
+        # uint32 upload buffer is in flight. This real compiler graph has one
+        # shared plaintext and 200 consumers, so only the first group needs
+        # preparation space. The 480-byte budget previously admitted it while
+        # omitting pinned storage from Host; 512 bytes covers the complete group.
+        small_spec=json.loads(spec.read_text());small_spec['context']['poly_degree']=8
+        small_spec_path=temp/'degree8-spec.json';small_spec_path.write_text(json.dumps(small_spec))
+        for backend in ('cpu','auto'):
+            bad=run(4096,extra=f'backend={backend}',host_budget=480,operator_spec=small_spec_path)
+            assert bad.returncode!=0 and 'single-group shared Host/pinned budget exceeded' in bad.stderr, \
+                f'{backend} omitted CPU upload pinned bytes from Host at 480: exit={bad.returncode} {bad.stderr}'
+            good=run(4096,extra=f'backend={backend}',host_budget=512,operator_spec=small_spec_path)
+            assert good.returncode==0,good.stderr
+            parsed=json.loads(Path(f'{prefix}.stream.runtime-plan.json').read_text())
+            instructions=parsed['initialization']+parsed['execution']
+            assert sum(i['kind']=='prepare_plaintext' for i in instructions)==1
+            assert sum(i['kind']=='compute' for i in instructions)==200
+            assert not any(i['kind']=='fence' for i in instructions)
+        # GPU's raw-double/padded-pinned buffers already fit the raw Host
+        # allowance. Fixing CPU must not add its RNS upload staging here.
+        gpu=run(4096,extra='backend=gpu',host_budget=64,operator_spec=small_spec_path)
+        assert gpu.returncode==0,gpu.stderr
+        print('PASS: degree8 CPU/Auto Host480 rejects, Host512 completes unchanged 200-consumer graph; GPU Host64 remains feasible')
 
 if __name__=='__main__': main()

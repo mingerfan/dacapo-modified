@@ -103,7 +103,9 @@ struct PlanPlaintextWaterlinePass : ckks::impl::PlanPlaintextWaterlineBase<PlanP
         const auto b=bytes(v); plain[place(v)] = add(plain[place(v)], b);
         const uint64_t raw=degree*8; // bounded file/decode/padded input buffers
         if (raw > rawBudget) throw std::runtime_error("raw budget below single Prepare baseline");
-        hostTemp=add(hostTemp, raw + (backend == "gpu" ? 0 : b*2+degree*32));
+        // CPU's uint64 plaintext and separate uint32 pinned upload buffer
+        // coexist until H2D completion. Pinned is also part of total Host use.
+        hostTemp=add(hostTemp, raw + (backend == "gpu" ? 0 : b*3+degree*32));
         pinnedTemp=add(pinnedTemp, backend == "gpu" ? degree*4 : b);
         if (backend == "gpu") temporary[place(v)]=add(temporary[place(v)], degree*64+b);
       }
