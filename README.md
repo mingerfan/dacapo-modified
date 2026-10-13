@@ -40,8 +40,10 @@ are:
 - `assign-ckks-placement`: assigns deterministic rank/device placement from an
   OperatorSpec and places decrypt/re-encrypt Boot operations on Host;
 - `materialize-ckks-communication`: inserts explicit `dist.transfer` values;
-- `emit-runtime-plan`: writes RuntimePlan V1 JSON and optional plaintext bundle
-  files.
+- `plan-plaintext-waterline`: replaces direct Host Encode uploads with Device
+  Prepare and checks complete single-group capacity after unchanged HEFT;
+- `emit-runtime-plan`: writes semantic RuntimePlan V1/V2/V3/V4 as binary or
+  JSON, with an optional plaintext bundle.
 
 Run `hecate-opt --help` for pass options. The RuntimePlan CTest covers Host,
 single-rank/multi-device, multi-rank placement, lazy physical levels, Host Boot,
@@ -105,7 +107,7 @@ RuntimePlan JSON and its plaintext bundle still contain the complete payloads.
 Plaintext bundles default to storage V2: one `data.bin` with byte offsets in
 `manifest.json`. Use `--runtime-plan-bundle-format=files` (or the export pass
 option `bundle-format=files`) for the legacy per-blob layout. This storage version
-is independent of RuntimePlan V1/V2/V3; older readers require the legacy layout.
+is independent of RuntimePlan V1/V2/V3/V4; older readers require the legacy layout.
 
 For large native traces, `hc.save(directory, directory, bytecode=True)` writes
 lossless `.mlirbc` bytecode, which `hecate-opt` reads directly. Constants are
@@ -117,10 +119,27 @@ communication. Add `--runtime-plan-memory --runtime-plan-memory-report` for
 Release, supported input reuse, and per-place estimates before and after memory
 planning. Estimates count RNS object storage (8-byte host / 4-byte GPU words);
 keys, operator workspaces, transfer staging and allocator pools are excluded.
-Encode and its transfers still run in initialization, so Release does not make
-all weight plaintexts lazy. The placement ready queue, iterative priorities,
+In eager mode, Encode and its transfers run in initialization, so Release alone
+does not make all weight plaintexts lazy. Waterline lowers direct uploads to
+execution Prepare instead. The placement ready queue, iterative priorities,
 merged occupied ranges, last-use release buckets and deferred peak reconstruction
 avoid repeated full-graph scans in these passes.
+
+## Waterline plaintext preparation
+
+`--runtime-plan-plaintext-schedule=eager|waterline` defaults to eager. Waterline requires one-rank placement and positive budgets:
+
+- `--runtime-plan-gpu-budget-bytes`: per-card executor capacity, with reserve and dynamic objects charged together.
+- `--runtime-plan-host-budget-bytes`: shared Host objects, raw buffers, CPU encoder temporaries and pinned staging.
+- `--runtime-plan-pinned-budget-bytes`: shared pinned upload/communication staging.
+- `--runtime-plan-raw-budget-bytes`: admitted raw read/decode data.
+
+`--runtime-plan-reserve-bytes` covers keys, parameter tables, retained workspace, overhead and safety margin. `--runtime-plan-waterline-fraction` must be strictly between zero and one. `--runtime-plan-workspace-bytes-per-op` bounds a consumer group's foreground workspace; zero only checks objects, not total GPU memory. `--runtime-plan-prepare-backend=cpu|gpu|auto` selects complete Encode candidates; `--runtime-plan-lookahead-groups` bounds the rolling window.
+
+Waterline runs after unchanged HEFT placement and communication, before memory planning, which is always enabled in Waterline mode. It emits one shared Device Prepare for a direct Host Encode/upload, without static batch cloning, re-encoding or automatic Fence. Do not run Encode CSE afterward. Plaintext final outputs, multiple ranks and infeasible complete groups are rejected; ordinary Encode/Transfer and explicit Fence retain their meaning.
+
+The `.waterline.json` report checks a sequential complete-group baseline with retained objects and the configured workspace upper bound. Runtime repeats the check using backend resources, then admits complete direct-dependency groups and releases credits at actual completion. Host/pinned/raw budgets are shared across GPUs. Keys, parameters, retained caches and allocator overhead must fit the reserve; object reports do not prove total driver memory. See the parent Runtime's [`docs/runtime-plan/v4.md`](../../docs/runtime-plan/v4.md). CTest's `check-waterline.py` checks Prepare V4, sharing, unchanged foreground placement/order, no automatic Fence and single-group rejection.
+
 
 ## Python Tracing
 
@@ -150,4 +169,4 @@ the removed HEVM runner.
 
 ### RuntimePlan output formats
 
-RuntimePlan export defaults to binary: `.runtime-plan.bin`, a packed bundle with `manifest.bin` and `data.bin`. Use `--runtime-plan-format=json --runtime-plan-pretty=true` when you need readable instructions; the pass option is `plan-format=json`. Binary mode uses `plan-format=binary`, requires pack storage, and writes a versioned little-endian header (`CKKSPL01`, u32 container version, u32 metadata length, small metadata JSON). Manifest magic is `CKKSMF01`. Semantic plan V1/V2/V3 is separate from container version. The writer preserves the same IDs, instruction ordering, and memory scheduling. Use separate output prefixes for JSON and binary artifacts.
+RuntimePlan export defaults to binary: `.runtime-plan.bin`, a packed bundle with `manifest.bin` and `data.bin`. Use `--runtime-plan-format=json --runtime-plan-pretty=true` when you need readable instructions; the pass option is `plan-format=json`. Binary mode uses `plan-format=binary`, requires pack storage, and writes a versioned little-endian header (`CKKSPL01`, u32 container version, u32 metadata length, small metadata JSON). Manifest magic is `CKKSMF01`. Semantic plan V1/V2/V3/V4 is separate from container version. The writer preserves the same IDs, instruction ordering, and memory scheduling. Use separate output prefixes for JSON and binary artifacts.
