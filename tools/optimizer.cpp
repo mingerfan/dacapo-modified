@@ -220,13 +220,17 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
   enum class BootstrapStrategy { Optimized, Greedy, DepthDP };
   static cl::opt<BootstrapStrategy> bootstrap_strategy{
-      "boot-placement", cl::desc("Bootstrap placement strategy for --dacapo"),
-      cl::values(clEnumValN(BootstrapStrategy::Optimized, "optimized",
-                            "Search bootstrap candidates with DaCapo"),
-                 clEnumValN(BootstrapStrategy::Greedy, "greedy",
-                            "Refresh exhausted inputs with a forward scan"),
-                 clEnumValN(BootstrapStrategy::DepthDP, "depth-dp",
-                            "Choose narrow depth boundaries with dynamic programming")),
+      "boot-placement",
+      cl::desc(
+          "Bootstrap placement strategy for --dacapo and --dacapo-precompile"),
+      cl::values(
+          clEnumValN(BootstrapStrategy::Optimized, "optimized",
+                     "Search bootstrap candidates with DaCapo"),
+          clEnumValN(BootstrapStrategy::Greedy, "greedy",
+                     "Refresh exhausted inputs with a forward scan"),
+          clEnumValN(
+              BootstrapStrategy::DepthDP, "depth-dp",
+              "Choose narrow depth boundaries with dynamic programming")),
       cl::init(BootstrapStrategy::Optimized)};
 
   static cl::opt<bool> enable_printer{
@@ -570,68 +574,89 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
         addRuntimePlanExport(pm, (std::filesystem::path(dir) / stem).string());
       });
 
+  auto addDaCapoPrecompile = [&](OpPassManager &pm) {
+    std::string dir;
+    std::string stem;
+    if (outputFilename != "-") {
+      std::filesystem::path outputName(outputFilename.getValue());
+      stem = outputName.stem();
+      dir = outputName.parent_path();
+    }
+    if (enable_check_smu)
+      pm.addPass(hecate::earth::createSMUChecker());
+
+    pm.addNestedPass<func::FuncOp>(hecate::earth::createRemoveBootstrap());
+    if (bootstrap_strategy != BootstrapStrategy::Optimized) {
+      pm.addNestedPass<func::FuncOp>(
+          hecate::earth::createGreedyBootstrapPlacement(
+              {waterline, output_val,
+               bootstrap_strategy == BootstrapStrategy::DepthDP}));
+    } else {
+      pm.addNestedPass<func::FuncOp>(
+          hecate::earth::createBypassDetection({waterline, 0.5}));
+      pm.addNestedPass<func::FuncOp>(
+          hecate::earth::createCandidateSelection({waterline, output_val}));
+      pm.addNestedPass<func::FuncOp>(
+          hecate::earth::createDaCapoPlanner({waterline, output_val}));
+      pm.addNestedPass<func::FuncOp>(hecate::earth::createBootstrapPlacement());
+      pm.addNestedPass<func::FuncOp>(
+          hecate::earth::createProactiveRescaling({waterline, output_val}));
+    }
+    /* pm.addNestedPass<func::FuncOp>( */
+    /*     hecate::earth::createSNRRescaling({waterline, output_val})); */
+    pm.addNestedPass<func::FuncOp>(hecate::earth::createEarlyModswitch());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+
+    if (enable_check_smu)
+      pm.addPass(hecate::earth::createSMUChecker());
+
+    pm.addPass(createCSEPass());
+    pm.addPass(createCanonicalizerPass());
+
+    if (enable_printer)
+      pm.addPass(createLocationSnapshotPass(
+          OpPrintingFlags().enableDebugInfo(false, false),
+          dir + "/" + stem + ".earth.mlir", "earth"));
+
+    pm.addNestedPass<func::FuncOp>(
+        hecate::earth::createEarthToCKKSConversionPass());
+
+    pm.addNestedPass<func::FuncOp>(
+        hecate::ckks::createUpscaleToMulcpConversionPass());
+    // Share equal encodings before placement and lifetime planning.
+    pm.addNestedPass<func::FuncOp>(createCSEPass());
+
+    if (enable_printer)
+      pm.addPass(createLocationSnapshotPass(
+          OpPrintingFlags().enableDebugInfo(false, false),
+          dir + "/" + stem + ".ckks.mlir", "ckks"));
+    pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  };
+
+  auto addCKKSToRuntimePlan = [&, addRuntimePlanExport](OpPassManager &pm) {
+    std::string prefix;
+    if (outputFilename != "-") {
+      std::filesystem::path outputName(outputFilename.getValue());
+      prefix = (outputName.parent_path() / outputName.stem()).string();
+    }
+    addRuntimePlanExport(pm, prefix);
+  };
+
   PassPipelineRegistration<>(
-      "dacapo", "Perform automatic bootstrapping placement",
-      [&, addRuntimePlanExport](OpPassManager &pm) {
-        std::string dir;
-        std::string stem;
-        if (outputFilename != "-") {
-          std::filesystem::path outputName(outputFilename.getValue());
-          stem = outputName.stem();
-          dir = outputName.parent_path();
-        }
-        if (enable_check_smu)
-          pm.addPass(hecate::earth::createSMUChecker());
-
-        pm.addNestedPass<func::FuncOp>(hecate::earth::createRemoveBootstrap());
-        if (bootstrap_strategy != BootstrapStrategy::Optimized) {
-          pm.addNestedPass<func::FuncOp>(
-              hecate::earth::createGreedyBootstrapPlacement(
-                  {waterline, output_val,
-                   bootstrap_strategy == BootstrapStrategy::DepthDP}));
-        } else {
-          pm.addNestedPass<func::FuncOp>(
-              hecate::earth::createBypassDetection({waterline, 0.5}));
-          pm.addNestedPass<func::FuncOp>(
-              hecate::earth::createCandidateSelection({waterline, output_val}));
-          pm.addNestedPass<func::FuncOp>(
-              hecate::earth::createDaCapoPlanner({waterline, output_val}));
-          pm.addNestedPass<func::FuncOp>(
-              hecate::earth::createBootstrapPlacement());
-          pm.addNestedPass<func::FuncOp>(
-              hecate::earth::createProactiveRescaling({waterline, output_val}));
-        }
-        /* pm.addNestedPass<func::FuncOp>( */
-        /*     hecate::earth::createSNRRescaling({waterline, output_val})); */
-        pm.addNestedPass<func::FuncOp>(hecate::earth::createEarlyModswitch());
-        pm.addPass(mlir::createCanonicalizerPass());
-        pm.addPass(mlir::createCSEPass());
-
-        if (enable_check_smu)
-          pm.addPass(hecate::earth::createSMUChecker());
-
-        pm.addPass(createCSEPass());
-        pm.addPass(createCanonicalizerPass());
-
-        if (enable_printer)
-          pm.addPass(createLocationSnapshotPass(
-              OpPrintingFlags().enableDebugInfo(false, false),
-              dir + "/" + stem + ".earth.mlir", "earth"));
-
-        pm.addNestedPass<func::FuncOp>(
-            hecate::earth::createEarthToCKKSConversionPass());
-
-        pm.addNestedPass<func::FuncOp>(
-            hecate::ckks::createUpscaleToMulcpConversionPass());
-        // Share equal encodings before placement and lifetime planning.
-        pm.addNestedPass<func::FuncOp>(createCSEPass());
-
-        if (enable_printer)
-          pm.addPass(createLocationSnapshotPass(
-              OpPrintingFlags().enableDebugInfo(false, false),
-              dir + "/" + stem + ".ckks.mlir", "ckks"));
-        pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-        addRuntimePlanExport(pm, (std::filesystem::path(dir) / stem).string());
+      "dacapo-precompile",
+      "Run Boot planning and lower to unplaced logical CKKS for manual reuse",
+      addDaCapoPrecompile);
+  PassPipelineRegistration<>(
+      "ckks-to-runtime-plan",
+      "Run physical levels, placement, communication and export on CKKS input",
+      addCKKSToRuntimePlan);
+  PassPipelineRegistration<>(
+      "dacapo",
+      "Perform automatic bootstrapping placement and RuntimePlan export",
+      [addDaCapoPrecompile, addCKKSToRuntimePlan](OpPassManager &pm) {
+        addDaCapoPrecompile(pm);
+        addCKKSToRuntimePlan(pm);
       });
   PassPipelineRegistration<>(
       "pars", "Perform Scale Management on bootstrapped models",

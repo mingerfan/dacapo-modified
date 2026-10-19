@@ -53,6 +53,14 @@ add_test(
 )
 
 add_test(
+  NAME DacapoManualPrecompile
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-precompile.py
+          --hecate-opt $<TARGET_FILE:hecate-opt>
+          --source-dir ${PROJECT_SOURCE_DIR}
+)
+
+add_test(
   NAME DacapoRuntimePlanPipeline
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check.py

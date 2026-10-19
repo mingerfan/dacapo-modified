@@ -64,6 +64,30 @@ Depth-dp adapts the method in [Fhelipe, PLDI 2024](https://doi.org/10.1145/36563
 
 Both fast planners support straight-line Earth functions with ciphertext inputs and constant, multiply, add, rotate and negate operations. They require `0 < waterline <= rescalingFactor` and `bootstrapLevelUpperBound - bootstrapLevelLowerBound >= 2`. Unsupported inputs produce errors. They may add more Boot/rescale operations than the latency-aware planner.
 
+## Manual compilation checkpoints
+
+Generate a checkpoint explicitly with `--dacapo-precompile`. It runs the same Boot planning, scale management, Earth-to-CKKS lowering, CSE and canonicalization as the first part of `--dacapo`, then stops before physical-level materialization, placement, communication and RuntimePlan export:
+
+```bash
+build/nix/bin/hecate-opt model.earth.mlir --dacapo-precompile \
+  --ckks-config=config.json --waterline=40 --boot-placement=optimized \
+  --emit-bytecode -o model.ckks.mlirbc
+```
+
+Reuse that file explicitly with `--ckks-to-runtime-plan`. Pass the same `--ckks-config` and your normal `--runtime-plan-*` options for physical levels, target metadata, placement, communication, memory planning and export. In this Bash example, `runtime_options` is an array containing those options from your full compile command:
+
+```bash
+build/nix/bin/hecate-opt model.ckks.mlirbc --ckks-to-runtime-plan \
+  --ckks-config=config.json "${runtime_options[@]}" \
+  -o model.gpu4.mlir
+```
+
+This second pipeline skips all Earth/Boot planning passes. Use the original unplaced checkpoint for each GPU count, topology, communication profile or memory budget. The input checkpoint is left unchanged. `--dacapo` remains the complete pipeline and uses these same two stages internally.
+
+There is no automatic lookup, freshness check or regeneration. Regenerate the checkpoint when the DSL, traced constants/weights, early pass implementation, compiler profile, Boot strategy, waterline or other early options change. Keep the generation command alongside the checkpoint. A checkpoint already fixes logical CKKS levels and scales; later target/context and physical-level options must be compatible with them. Changing early options on the resume command does not rerun those passes. Use a compatible compiler to read its bytecode.
+
+Both lossless text MLIR and bytecode work. Bytecode is recommended for large constants. For text, omit `--emit-bytecode`, use `.mlir`, and do not elide elements or resource data. Debug snapshots and the final placed `.mlir` are not the checkpoint produced by `--dacapo-precompile`.
+
 ## Python tracing and constants
 
 ```bash
