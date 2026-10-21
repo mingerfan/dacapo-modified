@@ -51,7 +51,7 @@ struct CodeSegmentationPass
     } else {
       for (uint64_t i = 0; i < ret.size(); i++) {
         func->walk([&](hecate::earth::BootstrapOp bop) {
-          auto btp = hecate::getIntegerAttr("opid", bop);
+          auto btp = bop->getAttrOfType<IntegerAttr>("boot_target").getInt();
           if (ret[i] == btp) {
             rets.push_back(bop);
             return;

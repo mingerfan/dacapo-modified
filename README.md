@@ -58,11 +58,15 @@ The `.waterline.json` report checks a sequential complete-group baseline with re
 
 `--boot-placement=optimized|greedy|depth-dp` selects the Earth planner; optimized remains the default. The model artifact generator in the parent CKKS Runtime repository accepts the same option.
 
-Greedy refreshes exhausted multiply inputs and shares refreshes with later uses. Depth-dp uses multiplicative-depth boundaries and a conservative count of unique ciphertexts crossing them, with analysis cost `O(V + E + D*L)` plus `O(V log V)` operation ordering. It accounts for the level consumed when Boot outputs return to the waterline. Its optimum applies only to this restricted boundary cost model, not arbitrary DAG placement or level-dependent latency.
+All three planners preserve the residual scale: after multiplication, rescale while `scale >= waterline + rescalingFactor`, consuming one Q each time. Addition raises the smaller scale with encoded one and aligns levels with ModSwitch. `--bootstrap-scale` specifies the Boot output independently of its input; zero retains the legacy `rescalingFactor` default. Boot resets consumed Q to zero and only consumes additional Q if its output itself crosses the Rescale threshold. Returns retain their remaining Q.
+
+Optimized retains DaCapo's candidate points, bypass analysis, coverage and latency planning. Analysis and emission share these scale transitions. Its dynamic program keeps distinct scale/Q states for live values across a boundary, using the compiler profile's level-dependent latency tables. Plans record boundary/target pairs, so a value may be refreshed repeatedly and its earlier consumers keep their original input. Inputs which have already consumed Q may be refreshed at boundary zero. It is more expensive to compile than the fast planners; the candidate/bypass search is not a claim of global optimality over all DAG placements.
+
+Greedy refreshes exhausted multiply inputs and shares refreshes with later uses. Depth-dp uses multiplicative-depth boundaries and a conservative count of unique ciphertexts crossing them, with analysis cost `O(V + E + D*L)` plus `O(V log V)` operation ordering. Its optimum applies only to this restricted boundary cost model, not arbitrary DAG placement or level-dependent latency.
 
 Depth-dp adapts the method in [Fhelipe, PLDI 2024](https://doi.org/10.1145/3656382). The upstream reference is revision `891b3086bf6a144deebac79290801253b9cc510c`, particularly [the DP pass](https://github.com/fhelipe-compiler/fhelipe/blob/891b3086bf6a144deebac79290801253b9cc510c/backend/src/dp_bootstrapping_pass.cc) and [depth analysis](https://github.com/fhelipe-compiler/fhelipe/blob/891b3086bf6a144deebac79290801253b9cc510c/backend/src/dag_depth_info.cc). This fork does not implement its connected-component chokepoint or exhaustive shortcut subset selection.
 
-Both fast planners support straight-line Earth functions with ciphertext inputs and constant, multiply, add, rotate and negate operations. They require `0 < waterline <= rescalingFactor` and `bootstrapLevelUpperBound - bootstrapLevelLowerBound >= 2`. Unsupported inputs produce errors. They may add more Boot/rescale operations than the latency-aware planner.
+The planners support straight-line Earth functions with ciphertext inputs and constant, multiply, add, rotate and negate operations. Scales and `rescalingFactor` must be positive, Boot output scale must be at least `waterline`, and `bootstrapLevelUpperBound - bootstrapLevelLowerBound` must leave enough Q for the chosen operations. Unsupported inputs and infeasible budgets produce errors. Optimized does not switch to either fast planner on failure.
 
 ## Manual compilation checkpoints
 
@@ -70,7 +74,7 @@ Generate a checkpoint explicitly with `--dacapo-precompile`. It runs the same Bo
 
 ```bash
 build/nix/bin/hecate-opt model.earth.mlir --dacapo-precompile \
-  --ckks-config=config.json --waterline=40 --boot-placement=optimized \
+  --ckks-config=config.json --waterline=40 --bootstrap-scale=45 --boot-placement=optimized \
   --emit-bytecode -o model.ckks.mlirbc
 ```
 

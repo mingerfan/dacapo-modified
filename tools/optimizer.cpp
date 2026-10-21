@@ -596,15 +596,16 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
               {waterline, output_val,
                bootstrap_strategy == BootstrapStrategy::DepthDP, bootstrap_scale}));
     } else {
+      pm.addNestedPass<func::FuncOp>(hecate::earth::createBypassDetection(
+          {waterline, 0.5, bootstrap_scale}));
+      pm.addNestedPass<func::FuncOp>(hecate::earth::createCandidateSelection(
+          {waterline, output_val, bootstrap_scale}));
+      pm.addNestedPass<func::FuncOp>(hecate::earth::createDaCapoPlanner(
+          {waterline, output_val, bootstrap_scale}));
       pm.addNestedPass<func::FuncOp>(
-          hecate::earth::createBypassDetection({waterline, 0.5}));
-      pm.addNestedPass<func::FuncOp>(
-          hecate::earth::createCandidateSelection({waterline, output_val}));
-      pm.addNestedPass<func::FuncOp>(
-          hecate::earth::createDaCapoPlanner({waterline, output_val}));
-      pm.addNestedPass<func::FuncOp>(hecate::earth::createBootstrapPlacement());
-      pm.addNestedPass<func::FuncOp>(
-          hecate::earth::createProactiveRescaling({waterline, output_val}));
+          hecate::earth::createBootstrapPlacement({bootstrap_scale}));
+      pm.addNestedPass<func::FuncOp>(hecate::earth::createProactiveRescaling(
+          {waterline, output_val, bootstrap_scale}));
     }
     /* pm.addNestedPass<func::FuncOp>( */
     /*     hecate::earth::createSNRRescaling({waterline, output_val})); */
@@ -675,8 +676,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
         if (enable_check_smu)
           pm.addPass(hecate::earth::createSMUChecker());
 
-        pm.addNestedPass<func::FuncOp>(
-            hecate::earth::createProactiveRescaling({waterline, output_val}));
+        pm.addNestedPass<func::FuncOp>(hecate::earth::createProactiveRescaling(
+            {waterline, output_val, bootstrap_scale}));
         pm.addNestedPass<func::FuncOp>(hecate::earth::createEarlyModswitch());
 
         if (enable_check_smu)

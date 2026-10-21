@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--hecate-opt', type=Path, required=True)
     parser.add_argument('--source-dir', type=Path, required=True)
     parser.add_argument('--boot-scale', type=int, choices=(40, 45), default=40)
+    parser.add_argument('--strategy', choices=('depth-dp', 'optimized'), default='depth-dp')
     args = parser.parse_args()
     boot_scale = args.boot_scale
     boot_level = 27 if boot_scale == 40 else 22
@@ -46,7 +47,7 @@ def main():
         traced, output = temp / 'chain.mlir', temp / 'result.mlir'
         traced.write_text(source(40))
         for devices in (1, 4):
-            command = [str(args.hecate_opt), '--dacapo', '--boot-placement=depth-dp',
+            command = [str(args.hecate_opt), '--dacapo', f'--boot-placement={args.strategy}',
                 f'--ckks-config={profile}', '--waterline=40', f'--bootstrap-scale={boot_scale}',
                 '--runtime-plan-format=json', f'--runtime-plan-boot-profile={profile_id}',
                 '--runtime-plan-boot-implementation=native',

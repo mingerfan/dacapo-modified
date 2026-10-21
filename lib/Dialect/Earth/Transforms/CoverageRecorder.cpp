@@ -29,6 +29,7 @@ struct CoverageRecorderPass
   CoverageRecorderPass() {}
   CoverageRecorderPass(hecate::earth::CoverageRecorderOptions ops) {
     this->waterline = ops.waterline;
+    this->bootstrap_scale = ops.bootstrap_scale;
     this->threshold = ops.threshold;
   }
 
@@ -40,9 +41,7 @@ struct CoverageRecorderPass
                       .asArrayRef()
                       .front();
 
-    auto &ca = getAnalysis<hecate::CandidateAnalysis>();
     markAnalysesPreserved<hecate::CandidateAnalysis>();
-    hecate::ScaleManagementUnit smu(dup);
     auto &&block = dup.getBody().front();
     auto &&operations = block.getOperations();
     mlir::OpBuilder builder(dup);
@@ -60,39 +59,31 @@ struct CoverageRecorderPass
       argval.setType(input_type);
     }
 
-    // Calculate the coverages
+    // Analyze normalized results, not the pre-Rescale multiply scale.
     int64_t coverage = -1, bootCoverage = -1;
-    for (auto &&op : operations) {
-      if (auto sop = dyn_cast<hecate::earth::ForwardMgmtInterface>(op)) {
-        auto opid = hecate::getIntegerAttr("opid", sop->getResult(0));
-        if (!isa<hecate::earth::BootstrapOp>(sop) && opid < from)
-          continue;
-
-        // PARS Scale Management
-        builder.setInsertionPointAfter(sop.getOperation());
-        sop.processOperandsPARS(waterline);
-        /* sop.processOperandsSNR( */
-        /*     hecate::earth::calcWaterline(smu, sop.getOperation(),
-         * waterline)); */
-        inferTypeForward(sop);
-        sop.processResultsPARS(waterline);
-        /* builder.setInsertionPointAfter(sop.getOperation()); */
-        /* sop.processResultsSNR( */
-        /*     hecate::earth::calcWaterline(smu, sop.getOperation(),
-         * waterline)); */
-        /////////////////////////////////////////
-
-        // Find Bootstrapping Coverage
-        if (bootCoverage < 0 && !sop.isBootstrappable()) {
-          bootCoverage = opid;
-          continue;
-        }
-
-        // Find Coverage
-        if (!sop.isValidated()) {
-          coverage = opid;
-          break;
-        }
+    SmallVector<hecate::earth::ForwardMgmtInterface> original;
+    for (auto &op : operations)
+      if (auto forward = dyn_cast<hecate::earth::ForwardMgmtInterface>(op))
+        original.push_back(forward);
+    const int64_t bootScale =
+        bootstrap_scale ? bootstrap_scale.getValue()
+                        : hecate::earth::EarthDialect::rescalingFactor;
+    for (auto sop : original) {
+      auto opid = hecate::getIntegerAttr("opid", sop->getResult(0));
+      if (!isa<hecate::earth::BootstrapOp>(sop) && opid < from)
+        continue;
+      auto result =
+          hecate::earth::applyThresholdScale(sop, waterline, bootScale);
+      if (failed(result)) {
+        sop->emitError("type inference failed during Boot coverage analysis");
+        dup.erase();
+        return signalPassFailure();
+      }
+      auto type = hecate::earth::getScaleType(*result);
+      if (type.isCipher() &&
+          type.getLevel() > hecate::earth::bootstrapQBudget()) {
+        coverage = bootCoverage = opid;
+        break;
       }
     }
     dup.erase();

@@ -56,6 +56,8 @@ def ProactiveRescaling : Pass<"proactive-rescaling", "::mlir::func::FuncOp"> {
     "The minimal result scale of rescaling">,
     Option<"output_val", "output_val", "int64_t", /*default=*/"10",
     "The maximum result value bits of return value">,
+    Option<"bootstrap_scale", "bootstrap-scale", "int64_t", /*default=*/"0",
+    "Boot output scale; zero uses rescalingFactor">,
   ];
 }
 def EarlyModswitch: Pass<"early-modswitch", "::mlir::func::FuncOp"> {
@@ -144,6 +146,8 @@ def DaCapoPlanner : Pass<"dacapo-planner", "::mlir::func::FuncOp"> {
     "The minimal result scale of rescaling">,
     Option<"output_val", "output_val", "int64_t", /*default=*/"10",
     "The maximum result value bits of return value">,
+    Option<"bootstrap_scale", "bootstrap-scale", "int64_t", /*default=*/"0",
+    "Boot output scale; zero uses rescalingFactor">,
   ];
 }
 
@@ -152,6 +156,10 @@ def BootstrapPlacement : Pass<"bootstrapping-placement", "::mlir::func::FuncOp">
   let description = [{
     This pass places the bootstrapping operations to target edges.
   }];
+  let options = [
+    Option<"bootstrap_scale", "bootstrap-scale", "int64_t", /*default=*/"0",
+    "Boot output scale; zero uses rescalingFactor">,
+  ];
 }
 
 def GreedyBootstrapPlacement : Pass<"greedy-bootstrap-placement", "::mlir::func::FuncOp"> {
@@ -185,6 +193,8 @@ def CoverageRecorder : Pass<"coverage-recording", "::mlir::func::FuncOp"> {
     "The minimal result scale of rescaling">,
     Option<"threshold", "threshold", "float", /*default=*/"0.5",
     "The maximum result value bits of return value">,
+    Option<"bootstrap_scale", "bootstrap-scale", "int64_t", /*default=*/"0",
+    "Boot output scale; zero uses rescalingFactor">,
   ];
 }
 
@@ -198,6 +208,8 @@ def BypassDetection : Pass<"bypass-detection", "::mlir::func::FuncOp"> {
     "The minimal result scale of rescaling">,
     Option<"threshold", "threshold", "float", /*default=*/"0.5",
     "The maximum result value bits of return value">,
+    Option<"bootstrap_scale", "bootstrap-scale", "int64_t", /*default=*/"0",
+    "Boot output scale; zero uses rescalingFactor">,
   ];
 }
 def CandidateSelection : Pass<"candidate-selection", "::mlir::func::FuncOp"> {
@@ -210,6 +222,8 @@ def CandidateSelection : Pass<"candidate-selection", "::mlir::func::FuncOp"> {
     "The minimal result scale of rescaling">,
     Option<"output_val", "output_val", "int64_t", /*default=*/"10",
     "The maximum result value bits of return value">,
+    Option<"bootstrap_scale", "bootstrap-scale", "int64_t", /*default=*/"0",
+    "Boot output scale; zero uses rescalingFactor">,
   ];
 
 

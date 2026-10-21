@@ -244,11 +244,12 @@ def check_plan(plan, ir, graph, spec, exhausted):
 def main():
     p = argparse.ArgumentParser(); p.add_argument('--hecate-opt', type=Path, required=True)
     p.add_argument('--source-dir', type=Path, required=True); p.add_argument('--output-dir', type=Path)
+    p.add_argument('--strategies', nargs='+', choices=('greedy', 'depth-dp', 'optimized'), default=['greedy', 'depth-dp', 'optimized'])
     args = p.parse_args(); source_dir = args.source_dir.resolve()
     with tempfile.TemporaryDirectory(prefix='threshold-graphs-') as directory:
         root = args.output_dir.resolve() if args.output_dir else Path(directory)
         root.mkdir(parents=True, exist_ok=True); rows = []
-        for boot_scale, budget in ((40, 1), (40, 2), (40, 4), (120, 3), (120, 4), (120, 6)):
+        for boot_scale, budget in ((40, 1), (40, 2), (40, 4), (45, 1), (45, 2), (45, 4), (45, 18), (120, 3), (120, 4), (120, 6)):
             config = json.loads((source_dir / 'config.json').read_text())
             config.update(polynomialDegree=16, rescalingFactor=30, bootstrapLevelLowerBound=1,
                           bootstrapLevelUpperBound=budget+1, levelLowerBound=1, levelUpperBound=budget+1)
@@ -258,7 +259,7 @@ def main():
             spec['context']['default_scale_log2'] = 40
             spec['context']['rns_moduli'] = [(1 << 30) - (i + 1) * 32768 + 1 for i in range(50)]
             spec['rescale_mode'] = 'native'
-            implementation = 'native' if boot_scale == 40 else 'decrypt_reencrypt'
+            implementation = 'native' if boot_scale in (40, 45) else 'decrypt_reencrypt'
             spec['boot_profiles'] = [dict(profile_id='threshold', implementation=implementation,
                 input_level_min=4, input_level_max=49, input_components=2,
                 output_level=4+budget, output_scale_log2=boot_scale, output_components=2,
@@ -268,7 +269,7 @@ def main():
                 exhausted = (budget if exhausted is True else
                              max(0, budget-2) if exhausted == 'two-left' else 0)
                 minimum = graph.minimum_boots(budget, boot_scale, exhausted)
-                for strategy in ('greedy', 'depth-dp'):
+                for strategy in args.strategies:
                     out = root / f'{boot_scale}-q{budget}-{strategy}-{name}'; out.mkdir(exist_ok=True)
                     (out/'input.mlir').write_text(graph.source(exhausted))
                     (out/'config.json').write_text(json.dumps(config))
@@ -292,7 +293,8 @@ def main():
                     if math.isinf(minimum):
                         assert run.returncode != 0, out.name
                         assert ('no feasible depth-DP placement' in run.stderr or
-                                'multiplication cannot fit after Boot' in run.stderr), run.stderr
+                                'multiplication cannot fit after Boot' in run.stderr or
+                                'no feasible DaCapo candidate set' in run.stderr), run.stderr
                         rows.append(dict(case=out.name, expected_infeasible=True))
                         continue
                     assert run.returncode == 0, (out.name, run.stderr)

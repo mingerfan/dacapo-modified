@@ -5,6 +5,83 @@
 
 using namespace mlir;
 
+int64_t hecate::earth::bootstrapQBudget() {
+  return EarthDialect::bootstrapLevelUpperBound -
+         EarthDialect::bootstrapLevelLowerBound;
+}
+
+Value hecate::earth::normalizeScale(Value value, OpBuilder &builder,
+                                    int64_t waterline, bool replaceUses) {
+  IRRewriter rewriter(builder);
+  while (getScaleType(value).getScale() >=
+         waterline + EarthDialect::rescalingFactor) {
+    auto next = builder.create<RescaleOp>(value.getLoc(), value);
+    if (replaceUses)
+      rewriter.replaceAllUsesExcept(value, next, next);
+    value = next;
+  }
+  return value;
+}
+
+FailureOr<Value> hecate::earth::applyThresholdScale(ForwardMgmtInterface op,
+                                                    int64_t waterline,
+                                                    int64_t bootstrapScale) {
+  if (waterline <= 0 || EarthDialect::rescalingFactor <= 0)
+    return failure();
+  OpBuilder builder(op);
+  if (auto boot = dyn_cast<BootstrapOp>(op.getOperation())) {
+    if (auto planned = boot->getAttrOfType<IntegerAttr>("planned_scale");
+        planned && planned.getInt() != bootstrapScale) {
+      op->emitError("Boot output scale disagrees with scale-management policy");
+      return failure();
+    }
+    if (!boot->hasAttr("planned_scale") && boot.getTargetScale() > 0 &&
+        boot.getTargetScale() != bootstrapScale) {
+      op->emitError("Boot output scale disagrees with scale-management policy");
+      return failure();
+    }
+    boot.setTargetLevel(0);
+    boot.setTargetScale(bootstrapScale);
+  } else {
+    // Encoding belongs to the consumer: sharing one mutable plaintext type
+    // across differently scaled/leveled consumers changes earlier operands.
+    for (auto &operand : op->getOpOperands())
+      if (auto constant = operand.get().getDefiningOp<ConstantOp>();
+          constant && !constant->getResult(0).hasOneUse())
+        operand.set(builder.clone(*constant)->getResult(0));
+    op.processOperandsEVA(waterline);
+  }
+  SmallVector<Type> types;
+  auto inference = cast<InferTypeOpInterface>(op.getOperation());
+  if (failed(inference.inferReturnTypes(
+          op->getContext(), op->getLoc(), op->getOperands(),
+          op->getAttrDictionary(), op->getPropertiesStorage(), op->getRegions(),
+          types)))
+    return failure();
+  op->getResult(0).setType(types.front());
+  builder.setInsertionPointAfter(op);
+  Value result = op->getResult(0);
+  if (isa<MulOp, BootstrapOp>(op.getOperation()))
+    result = normalizeScale(result, builder, waterline, true);
+  return result;
+}
+
+void hecate::earth::finishThresholdScale(func::FuncOp func, OpBuilder &builder,
+                                         TypeRange inputTypes) {
+  auto result = cast<func::ReturnOp>(func.front().getTerminator());
+  func.setFunctionType(
+      builder.getFunctionType(inputTypes, result.getOperandTypes()));
+  func->setAttr("init_level", builder.getI64IntegerAttr(
+                                  EarthDialect::bootstrapLevelUpperBound));
+  SmallVector<int64_t> inputScales, outputScales;
+  for (Value arg : func.getArguments())
+    inputScales.push_back(getScaleType(arg).getScale());
+  for (Value value : result.getOperands())
+    outputScales.push_back(getScaleType(value).getScale());
+  func->setAttr("arg_scale", builder.getDenseI64ArrayAttr(inputScales));
+  func->setAttr("res_scale", builder.getDenseI64ArrayAttr(outputScales));
+}
+
 void hecate::earth::refineLevel(mlir::OpBuilder builder, mlir::Operation *op,
                                 int64_t waterline, int64_t output_val,
                                 int64_t min_level) {
@@ -151,7 +228,9 @@ llvm::SmallVector<mlir::Value, 4>
 hecate::earth::attachOpid(mlir::func::FuncOp func) {
   llvm::SmallVector<mlir::Value, 4> values;
   // attach the opid to operation
-  values.push_back(NULL);
+  values.push_back(nullptr);
+  for (Value argument : func.getArguments())
+    values.push_back(argument);
   func->walk([&](hecate::earth::HEScaleOpInterface sop) {
     if ((llvm::isa<hecate::earth::UpscaleOp>(sop) ||
          llvm::isa<hecate::earth::RescaleOp>(sop) ||

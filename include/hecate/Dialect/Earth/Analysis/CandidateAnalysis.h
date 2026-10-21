@@ -44,7 +44,7 @@ private:
   // Liveness Information
   mlir::SmallVector<int64_t, 4> liveOuts;
   mlir::SmallVector<int64_t, 4> liveIns;
-  int64_t deadOpid;
+  int64_t deadOpid = std::numeric_limits<int64_t>::max();
 
   // Coverage Information
   bool isBypass = false;
@@ -76,6 +76,7 @@ void doLiveAnalysis(
   mlir::SmallVector<int64_t, 4> getCandidateSet(size_t size) const;
   mlir::SmallVector<int64_t, 4> getCandidates() const;
   mlir::SmallVector<int64_t, 4> getEdges() const;
+  mlir::SmallVector<int64_t, 4> getInitialTargets() const;
   mlir::SmallVector<bool, 4> getBypassTypeOfLiveOuts(int64_t opid);
 
   size_t getMaxNumOuts() const;

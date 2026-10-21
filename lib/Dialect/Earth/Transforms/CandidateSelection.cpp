@@ -1,82 +1,93 @@
-
 #include "hecate/Dialect/Earth/Analysis/CandidateAnalysis.h"
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
-#include "hecate/Dialect/Earth/IR/HEParameterInterface.h"
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/Builders.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/PassManager.h"
-#include "mlir/Transforms/Passes.h"
-#include <fstream>
+#include <algorithm>
 
-namespace hecate {
-namespace earth {
+namespace hecate::earth {
 #define GEN_PASS_DEF_CANDIDATESELECTION
 #include "hecate/Dialect/Earth/Transforms/Passes.h.inc"
-} // namespace earth
-} // namespace hecate
-
+} // namespace hecate::earth
 using namespace mlir;
-#define DEBUG_TYPE "Debug"
 
 namespace {
-/// Pass to bufferize Arith ops.
 struct CandidateSelectionPass
-    : public hecate::earth::impl::CandidateSelectionBase<
-          CandidateSelectionPass> {
-  CandidateSelectionPass() {}
-  CandidateSelectionPass(hecate::earth::CandidateSelectionOptions ops) {
-    this->waterline = ops.waterline;
-    this->output_val = ops.output_val;
+    : hecate::earth::impl::CandidateSelectionBase<CandidateSelectionPass> {
+  CandidateSelectionPass() = default;
+  CandidateSelectionPass(hecate::earth::CandidateSelectionOptions options) {
+    waterline = options.waterline;
+    output_val = options.output_val;
+    bootstrap_scale = options.bootstrap_scale;
   }
-
   void runOnOperation() override {
-
     auto func = getOperation();
     auto &ca = getAnalysis<hecate::CandidateAnalysis>();
-
-    // Organize the validLiveOuts
-    for (auto a : ca.getEdges()) {
-      auto v = ca.getValueInfo(a);
-      mlir::SmallVector<int64_t, 4> validTargets;
-      for (auto bp : v->getLiveOuts()) {
-        auto vp = ca.getValueInfo(bp);
-        if (!vp->isBypassEdge(a)) {
-          validTargets.push_back(bp);
+    for (auto cut : ca.getEdges()) {
+      SmallVector<int64_t, 4> targets;
+      for (auto id : ca.getValueInfo(cut)->getLiveOuts())
+        if (!ca.getValueInfo(id)->isBypassEdge(cut))
+          targets.push_back(id);
+      ca.getValueInfo(cut)->setValidLiveOuts(targets);
+      ca.sortValidCandidates(cut);
+    }
+    OpBuilder builder(func);
+    OwningOpRef<ModuleOp> module = ModuleOp::create(func.getLoc());
+    PassManager pm(func.getContext());
+    pm.addNestedPass<func::FuncOp>(
+        hecate::earth::createBootstrapPlacement({bootstrap_scale}));
+    pm.addNestedPass<func::FuncOp>(hecate::earth::createProactiveRescaling(
+        {waterline, output_val, bootstrap_scale}));
+    // Candidate-set zero checks the no-Boot path. Initial refresh is optional
+    // and only concerns inputs which have already consumed Q.
+    for (size_t size = 0; size <= ca.getMaxNumOuts(); ++size) {
+      SmallVector<int64_t> cuts;
+      for (size_t group = 1; group <= size; ++group)
+        cuts.append(ca.getCandidateSet(group));
+      llvm::sort(cuts);
+      cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+      for (bool initial : {false, true}) {
+        auto initialTargets = ca.getInitialTargets();
+        if (initial && initialTargets.empty())
+          continue;
+        SmallVector<Attribute> entries;
+        if (initial) {
+          SmallVector<int64_t> entry{0};
+          entry.append(initialTargets);
+          entries.push_back(builder.getDenseI64ArrayAttr(entry));
+        }
+        for (auto cut : cuts) {
+          if (!cut || cut == ca.getRetOpid())
+            continue;
+          SmallVector<int64_t> entry{cut};
+          entry.append(ca.getTargets(cut, size));
+          entries.push_back(builder.getDenseI64ArrayAttr(entry));
+        }
+        auto copy = func.clone();
+        copy->setAttr("btp_schedule", builder.getArrayAttr(entries));
+        module->push_back(copy);
+        LogicalResult feasible = failure();
+        {
+          // Infeasible trial plans are normal search outcomes. A failed search
+          // emits one diagnostic below rather than errors from rejected trials.
+          ScopedDiagnosticHandler diagnostics(
+              func.getContext(), [](Diagnostic &) { return success(); });
+          feasible = pm.run(*module);
+        }
+        copy.erase();
+        if (succeeded(feasible)) {
+          func->setAttr("selected_set", builder.getI64IntegerAttr(size));
+          ca.finalizeCandidates(size);
+          markAnalysesPreserved<hecate::CandidateAnalysis>();
+          return;
         }
       }
-      v->setValidLiveOuts(validTargets);
-      ca.sortValidCandidates(a);
     }
-
-    mlir::OpBuilder builder(func);
-    auto mod = mlir::ModuleOp::create(func.getLoc());
-    PassManager pm(mod.getContext());
-    pm.addNestedPass<func::FuncOp>(hecate::earth::createBootstrapPlacement());
-    pm.addNestedPass<func::FuncOp>(
-        hecate::earth::createProactiveRescaling({waterline, output_val}));
-    /* pm.addNestedPass<func::FuncOp>( */
-    /*     hecate::earth::createSNRRescaling({waterline, output_val})); */
-
-    for (size_t i = 1; i <= ca.getMaxNumOuts(); i++) {
-      auto dup = func.clone();
-      mlir::OpBuilder builder(dup);
-      dup->setAttr("btp_target",
-                   builder.getDenseI64ArrayAttr(ca.sortTargets(i)));
-      mod.push_back(dup);
-      if (pm.run(mod).succeeded()) {
-        func->setAttr("selected_set", builder.getI64IntegerAttr(i));
-        LLVM_DEBUG(llvm::dbgs() << "selected _set : " << i << '\n';);
-        ca.finalizeCandidates(i);
-        dup.erase();
-        break;
-      }
-      dup.erase();
-    }
-
-    markAnalysesPreserved<hecate::CandidateAnalysis>();
+    func.emitError(
+        "no feasible DaCapo candidate set for the threshold Q budget");
+    signalPassFailure();
   }
-
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<hecate::earth::EarthDialect>();
   }

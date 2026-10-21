@@ -21,6 +21,17 @@ void refineReturnValues(mlir::func::FuncOp func, mlir::OpBuilder builder,
                         int64_t waterline, int64_t output_val);
 void inferTypeForward(hecate::earth::ForwardMgmtInterface sop);
 
+// Logical levels count consumed Q. Each threshold Rescale consumes one Q;
+// Boot starts a new chain with its explicitly selected output scale.
+int64_t bootstrapQBudget();
+mlir::Value normalizeScale(mlir::Value value, mlir::OpBuilder &builder,
+                           int64_t waterline, bool replaceUses = false);
+mlir::FailureOr<mlir::Value>
+applyThresholdScale(hecate::earth::ForwardMgmtInterface op, int64_t waterline,
+                    int64_t bootstrapScale);
+void finishThresholdScale(mlir::func::FuncOp func, mlir::OpBuilder &builder,
+                          mlir::TypeRange inputTypes);
+
 llvm::SmallVector<mlir::Value, 4> attachOpid(mlir::func::FuncOp func);
 
 // To Calculate the waterline for SNR Rescaling

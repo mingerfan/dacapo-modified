@@ -100,3 +100,16 @@ add_test(NAME DacapoPlaintextWaterline
           ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-waterline.py
           --hecate-opt $<TARGET_FILE:hecate-opt>
           --source-dir ${PROJECT_SOURCE_DIR})
+
+add_test(NAME DacapoOptimizedNativeScale45
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-native-scale40.py
+          --hecate-opt $<TARGET_FILE:hecate-opt>
+          --source-dir ${PROJECT_SOURCE_DIR}
+          --boot-scale 45 --strategy optimized)
+
+add_test(NAME DacapoOptimizedSchedule
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-optimized.py
+          --hecate-opt $<TARGET_FILE:hecate-opt>
+          --source-dir ${PROJECT_SOURCE_DIR})

@@ -16,6 +16,15 @@ void hecate::CandidateAnalysis::build() {
   smu.attach();
   values.emplace_back(0, nullptr);
   edges.push_back(0);
+  for (auto argument : mlir::cast<mlir::func::FuncOp>(_op).getArguments()) {
+    auto id = static_cast<int64_t>(values.size());
+    hecate::setIntegerAttr("opid", argument, id);
+    values.emplace_back(id, argument);
+    if (!argument.use_empty() && earth::getScaleType(argument).isCipher())
+      liveOut.push_back(id);
+  }
+  liveIn = liveOut;
+  values.front().setLiveOuts(liveOut);
   auto &&func = dyn_cast<mlir::func::FuncOp>(_op);
   auto &&bb = func.getBody().getBlocks().front();
   for (auto iter = bb.begin(); iter != bb.end(); ++iter) {
@@ -85,6 +94,15 @@ size_t hecate::CandidateAnalysis::getNumValues() const { return values.size(); }
 int64_t hecate::CandidateAnalysis::getRetOpid() const { return retOpid; }
 size_t hecate::CandidateAnalysis::getNumEdges() const { return edges.size(); }
 
+mlir::SmallVector<int64_t, 4>
+hecate::CandidateAnalysis::getInitialTargets() const {
+  mlir::SmallVector<int64_t, 4> targets;
+  for (auto id : values.front().getLiveOuts())
+    if (earth::getScaleType(values[id].getValue()).getLevel() > 0)
+      targets.push_back(id);
+  return targets;
+}
+
 ScaleManagementUnit hecate::CandidateAnalysis::getSMU() const { return smu; };
 size_t hecate::CandidateAnalysis::getMaxNumOuts() const {
   size_t ret = 0;
@@ -111,7 +129,7 @@ hecate::CandidateAnalysis::getCandidateSet(size_t size) const {
 }
 mlir::SmallVector<int64_t, 4>
 hecate::CandidateAnalysis::getTargets(int64_t opid) const {
-  if (opid == retOpid)
+  if (opid == 0 || opid == retOpid)
     return {};
   if (!values[opid].getValidLiveOuts().size())
     return values[opid].getLiveOuts();
@@ -120,13 +138,13 @@ hecate::CandidateAnalysis::getTargets(int64_t opid) const {
 }
 mlir::SmallVector<int64_t, 4>
 hecate::CandidateAnalysis::getTargets(int64_t opid, int64_t setNum) const {
-  if (opid == retOpid)
+  if (opid == 0 || opid == retOpid)
     return {};
   /* if (values[opid].getValidLiveOuts().size() == setNum) */
   /*   return values[opid].getValidLiveOuts(); */
   /* else */
   /*   return values[opid].getLiveOuts(); */
-  if (values[opid].getLiveOuts().size() == setNum)
+  if (values[opid].getLiveOuts().size() <= setNum)
     return values[opid].getLiveOuts();
   else
     return values[opid].getValidLiveOuts();
@@ -220,6 +238,8 @@ void hecate::CandidateAnalysis::finalizeCandidates(int64_t setNum) {
   }
   candidates.push_back(getRetOpid());
   std::sort(candidates.begin(), candidates.end());
+  candidates.erase(std::unique(candidates.begin(), candidates.end()),
+                   candidates.end());
   return;
 }
 
@@ -235,9 +255,13 @@ void hecate::CandidateAnalysis::pushFromCoverage(
     bc = getRetOpid();
   for (auto to : candidates) {
     if (to < bc && from < to) {
-      toFromMap[to].push_back(from);
+      auto &sources = toFromMap[to];
+      if (!llvm::is_contained(sources, from))
+        sources.push_back(from);
     } else if (to == getRetOpid() && c == getRetOpid()) {
-      toFromMap[to].push_back(from);
+      auto &sources = toFromMap[to];
+      if (!llvm::is_contained(sources, from))
+        sources.push_back(from);
     }
   }
   return;

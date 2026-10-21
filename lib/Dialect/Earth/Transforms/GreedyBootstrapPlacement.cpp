@@ -234,9 +234,7 @@ struct GreedyBootstrapPlacementPass
       return it == current.end() ? value : it->second;
     };
     auto normalize = [&](Value value) -> Value {
-      while (getScaleType(value).getScale() >= waterline + factor)
-        value = builder.create<RescaleOp>(value.getLoc(), value);
-      return value;
+      return normalizeScale(value, builder, waterline);
     };
 
     uint64_t bootCount = 0, barriers = 0;
@@ -331,14 +329,7 @@ struct GreedyBootstrapPlacementPass
           live.insert(result);
     }
 
-    auto result = cast<func::ReturnOp>(func.front().getTerminator());
-    func.setFunctionType(builder.getFunctionType(inputTypes, result.getOperandTypes()));
-    func->setAttr("init_level", builder.getI64IntegerAttr(EarthDialect::bootstrapLevelUpperBound));
-    SmallVector<int64_t> inputScales, outputScales;
-    for (Value arg : func.getArguments()) inputScales.push_back(getScaleType(arg).getScale());
-    for (Value value : result.getOperands()) outputScales.push_back(getScaleType(value).getScale());
-    func->setAttr("arg_scale", builder.getDenseI64ArrayAttr(inputScales));
-    func->setAttr("res_scale", builder.getDenseI64ArrayAttr(outputScales));
+    finishThresholdScale(func, builder, inputTypes);
     llvm::outs() << (depth_dp ? "Depth-DP" : "Greedy")
                  << " bootstrap boundaries: " << barriers << '\n'
                  << "Number of Bootstrapping: " << bootCount << '\n';
