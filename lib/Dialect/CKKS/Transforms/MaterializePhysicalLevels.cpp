@@ -1,12 +1,16 @@
 #include "hecate/Dialect/CKKS/IR/CKKSOps.h"
+#include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Dialect/CKKS/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "nlohmann/json.hpp"
 #include "llvm/ADT/SmallVector.h"
 
 #include <cstdint>
+#include <cmath>
+#include "llvm/ADT/DenseMap.h"
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -30,11 +34,15 @@ struct PhysicalLevelSpec {
   uint64_t upperBound = 0;
   uint64_t maxRescaleLevels = 0;
   std::vector<uint64_t> modulusBits;
+  std::vector<int64_t> moduli;
+  bool nativeRescale = false;
+  std::optional<int64_t> bootOutputScale;
 };
 
 FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
                                                    func::FuncOp func,
-                                                   uint64_t levelFactor) {
+                                                   uint64_t levelFactor,
+                                                   llvm::StringRef bootProfile) {
   if (path.empty()) {
     func.emitError("materialize-ckks-physical-levels requires --operator-spec");
     return failure();
@@ -67,7 +75,7 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
   }
   auto mode = spec.find("rescale_mode");
   if (mode == spec.end() || !mode->is_string() ||
-      mode->get<std::string>() != "lazy") {
+      (mode->get<std::string>() != "lazy" && mode->get<std::string>() != "native")) {
     func.emitError("physical-level materialization requires rescale_mode=lazy");
     return failure();
   }
@@ -107,8 +115,41 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
   }
 
   PhysicalLevelSpec result;
+  result.nativeRescale = mode->get<std::string>() == "native";
   result.lowerBound = static_cast<uint64_t>(signedLower);
   result.upperBound = static_cast<uint64_t>(signedUpper);
+  if (!bootProfile.empty()) {
+    const Json *selected = nullptr;
+    if (spec.contains("boot_profiles") && spec["boot_profiles"].is_array())
+      for (const auto &profile : spec["boot_profiles"])
+        if (profile.value("profile_id", std::string()) == bootProfile.str()) {
+          if (selected) {
+            func.emitError("duplicate physical-level Boot profile");
+            return failure();
+          }
+          selected = &profile;
+        }
+    if (!selected || !selected->contains("output_level") ||
+        !(*selected)["output_level"].is_number_integer() ||
+        !selected->contains("output_scale_log2") ||
+        !(*selected)["output_scale_log2"].is_number_integer()) {
+      func.emitError("physical-level Boot profile is missing or invalid");
+      return failure();
+    }
+    const auto anchor = (*selected)["output_level"].get<int64_t>();
+    if (anchor < signedLower || anchor > signedUpper) {
+      func.emitError("Boot output level is outside the physical chain");
+      return failure();
+    }
+    // Use the same recoverable working chain for inputs and refreshed values.
+    // Context primes above this anchor remain available inside native Boot.
+    result.upperBound = static_cast<uint64_t>(anchor);
+    result.bootOutputScale = (*selected)["output_scale_log2"].get<int64_t>();
+    if (*result.bootOutputScale <= 0) {
+      func.emitError("Boot output scale must be positive");
+      return failure();
+    }
+  }
   result.modulusBits.reserve(moduli->size());
   for (const Json &bits : *moduli) {
     if (!bits.is_number_integer()) {
@@ -123,6 +164,25 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
       return failure();
     }
     result.modulusBits.push_back(static_cast<uint64_t>(value));
+  }
+
+  if (result.nativeRescale) {
+    auto actual = context->find("rns_moduli");
+    if (actual == context->end() || !actual->is_array() || actual->size() != moduli->size()) {
+      func.emitError("native Rescale requires the actual rns_moduli chain");
+      return failure();
+    }
+    for (const auto &q : *actual) {
+      if (!q.is_number_integer() || q.get<int64_t>() <= 1 || q.get<int64_t>() >= (int64_t{1} << 53)) {
+        func.emitError("native Rescale moduli must be integers in (1, 2^53)");
+        return failure();
+      }
+      result.moduli.push_back(q.get<int64_t>());
+    }
+    if (levelFactor != 1) {
+      func.emitError("native Rescale requires one physical Q per logical level");
+      return failure();
+    }
   }
 
   auto operators = spec.find("operators");
@@ -152,6 +212,98 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
   }
   result.maxRescaleLevels = static_cast<uint64_t>(signedMaxLevels);
   return result;
+}
+
+LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec &spec) {
+  llvm::DenseMap<Value, double> scales;
+  for (Value arg : func.getArguments())
+    scales[arg] = ckks::getPolyType(arg).getScaleLog2();
+  OpBuilder builder(func.getContext());
+  auto annotate = [&](Operation *op, double scale) {
+    op->setAttr("runtime.scale_log2", builder.getF64FloatAttr(scale));
+    scales[op->getResult(0)] = scale;
+  };
+  for (auto &operation : llvm::make_early_inc_range(func.front())) {
+    auto *op = &operation;
+    if (op->getNumResults() == 0) continue;
+    if (auto encode = dyn_cast<ckks::EncodeOp>(op)) {
+      annotate(op, ckks::getPolyType(encode.getResult()).getScaleLog2());
+      continue;
+    }
+    if (auto boot = dyn_cast<ckks::BootstrapCOp>(op)) {
+      annotate(op, ckks::getPolyType(boot.getResult()).getScaleLog2());
+      continue;
+    }
+    if (op->getNumOperands() == 0 || !scales.count(op->getOperand(0)))
+      return op->emitError("cannot infer actual CKKS scale");
+    double scale = scales.lookup(op->getOperand(0));
+    if (isa<ckks::MulCCOp, ckks::MulCPOp>(op)) {
+      scale += scales.lookup(op->getOperand(1));
+    } else if (auto rescale = dyn_cast<ckks::RescaleCOp>(op)) {
+      auto source = ckks::getPolyType(rescale.getSrc());
+      auto target = ckks::getPolyType(rescale.getResult());
+      for (unsigned level = source.getLevel(); level > target.getLevel(); --level)
+        scale -= std::log2(static_cast<double>(spec.moduli.at(level)));
+    } else if (auto add = dyn_cast<ckks::AddCPOp>(op)) {
+      auto encode = add.getRhs().getDefiningOp<ckks::EncodeOp>();
+      if (!encode) return op->emitError("AddCP requires a local encoding for actual-scale alignment");
+      builder.setInsertionPoint(op);
+      auto local = builder.create<ckks::EncodeOp>(op->getLoc(), encode.getType(), encode.getPayload());
+      annotate(local, scale);
+      add.setOperand(1, local.getResult());
+      if (encode->use_empty()) encode.erase();
+    } else if (auto add = dyn_cast<ckks::AddCCOp>(op)) {
+      double rhs = scales.lookup(add.getRhs());
+      if (std::abs(scale - rhs) > 1e-10) {
+        unsigned lower = scale < rhs ? 0 : 1;
+        Value input = op->getOperand(lower);
+        double target = std::max(scale, rhs);
+        // Reuse an existing encoded-one alignment when it is local to this
+        // addition. This preserves its encoding precision and avoids a second
+        // near-unit encoding for the actual-prime correction.
+        SmallVector<Operation *> chain;
+        Value source = input;
+        while (auto mod = source.getDefiningOp<ckks::ModswitchCOp>()) {
+          if (!source.hasOneUse()) break;
+          chain.push_back(mod);
+          source = mod.getSrc();
+        }
+        auto mul = source.getDefiningOp<ckks::MulCPOp>();
+        auto unit = mul ? mul.getRhs().getDefiningOp<ckks::EncodeOp>() : ckks::EncodeOp{};
+        auto dense = unit ? dyn_cast<DenseElementsAttr>(unit.getPayload()) : DenseElementsAttr{};
+        bool reuse = mul && source.hasOneUse() && dense && dense.isSplat() &&
+                     dense.getElementType().isF64() && dense.getSplatValue<APFloat>().convertToDouble() == 1.0 &&
+                     target >= scales.lookup(mul.getLhs());
+        if (reuse) {
+          builder.setInsertionPoint(mul);
+          auto replacement = builder.create<ckks::EncodeOp>(mul.getLoc(), unit.getType(), unit.getPayload());
+          annotate(replacement, target - scales.lookup(mul.getLhs()));
+          mul.setOperand(1, replacement.getResult());
+          annotate(mul, target);
+          for (Operation *forward : chain) annotate(forward, target);
+          if (unit->use_empty()) unit.erase();
+        } else {
+          builder.setInsertionPoint(op);
+          auto inputType = cast<RankedTensorType>(input.getType());
+          auto poly = inputType.getElementType().cast<ckks::PolyTypeInterface>().switchComponents(1).switchScaleLog2(0);
+          auto plainType = RankedTensorType::get(inputType.getShape(), poly);
+          auto payloadType = RankedTensorType::get({hecate::earth::EarthDialect::polynomialDegree / 2}, builder.getF64Type());
+          auto payload = DenseElementsAttr::get(payloadType, builder.getF64FloatAttr(1.0));
+          auto encoded = builder.create<ckks::EncodeOp>(op->getLoc(), plainType, payload);
+          annotate(encoded, target - scales.lookup(input));
+          auto aligned = builder.create<ckks::MulCPOp>(op->getLoc(), input.getType(), input, encoded);
+          annotate(aligned, target);
+          op->setOperand(lower, aligned);
+        }
+        scale = target;
+      }
+    }
+    if (!std::isfinite(scale) || scale < 0 || scale > 1023)
+      return op->emitError("actual CKKS scale is outside the supported range");
+    annotate(op, scale);
+  }
+  func->setAttr("ckks.rns_moduli", builder.getDenseI64ArrayAttr(spec.moduli));
+  return success();
 }
 
 FailureOr<unsigned> mapLevel(uint64_t logicalLevel, uint64_t logicalBase,
@@ -233,7 +385,7 @@ struct MaterializePhysicalLevelsPass
     const uint64_t levelFactor =
         static_cast<uint64_t>(levelsPerLogicalLevel.getValue());
     FailureOr<PhysicalLevelSpec> spec =
-        readPhysicalLevelSpec(operatorSpecPath, func, levelFactor);
+        readPhysicalLevelSpec(operatorSpecPath, func, levelFactor, bootProfile);
     if (failed(spec)) {
       signalPassFailure();
       return;
@@ -257,6 +409,16 @@ struct MaterializePhysicalLevelsPass
           if (failed(mapped)) {
             signalPassFailure();
             return;
+          }
+          if (isa<ckks::BootstrapCOp>(op) && spec->bootOutputScale) {
+            auto tensor = cast<RankedTensorType>(*mapped);
+            auto poly = cast<ckks::PolyType>(tensor.getElementType());
+            if (poly.getLevel() != spec->upperBound ||
+                poly.getScaleLog2() != *spec->bootOutputScale) {
+              op.emitError("Boot result level/scale disagrees with selected profile; "
+                           "set the matching bootstrap-scale and logical budget");
+              return signalPassFailure();
+            }
           }
           mappedValues.emplace_back(result, *mapped);
         }
@@ -307,8 +469,8 @@ struct MaterializePhysicalLevelsPass
         // nominal bits leave room for a large enough rounding factor; the
         // backend must still check actual primes and the resulting error.
         constexpr uint64_t integerAlignmentBits = 30;
-        if (modulusDrop < scaleDrop ||
-            modulusDrop - scaleDrop < integerAlignmentBits) {
+        if (spec->nativeRescale ? modulusDrop != scaleDrop :
+            (modulusDrop < scaleDrop || modulusDrop - scaleDrop < integerAlignmentBits)) {
           op->emitError("physical Rescale requires at least 30 extra nominal "
                         "modulus bits for integer scale alignment");
           return WalkResult::interrupt();
@@ -361,6 +523,8 @@ struct MaterializePhysicalLevelsPass
     for (auto &[modswitch, downFactor] : modswitchFactors)
       modswitch.setDownFactor(downFactor);
 
+    if (spec->nativeRescale && failed(materializeActualScales(func, *spec)))
+      return signalPassFailure();
     Builder builder(func.getContext());
     func->setAttr("ckks.logical_init_level",
                   builder.getI64IntegerAttr(static_cast<int64_t>(logicalBase)));

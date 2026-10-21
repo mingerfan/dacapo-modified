@@ -37,6 +37,11 @@ struct BypassDetectionPass
   void runOnOperation() override {
 
     auto func = getOperation();
+    if (waterline > hecate::earth::EarthDialect::rescalingFactor) {
+      func.emitError("optimized PARS placement does not support the threshold scale policy; "
+                     "select --boot-placement=greedy or depth-dp");
+      return signalPassFailure();
+    }
     auto &ca = getAnalysis<hecate::CandidateAnalysis>();
     hecate::ScaleManagementUnit smu =
         getAnalysis<hecate::ScaleManagementUnit>();

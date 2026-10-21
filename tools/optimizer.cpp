@@ -208,6 +208,9 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
 
   static cl::opt<int64_t> waterline{
       "waterline", cl::desc("Waterline of scale management"), cl::init(20)};
+  static cl::opt<int64_t> bootstrap_scale{
+      "bootstrap-scale", cl::desc("Greedy/depth-DP Boot input/output scale; zero uses the legacy scale"),
+      cl::init(0)};
 
   static cl::opt<int64_t> output_val{
       "output-val", cl::desc("Output value upper bound  of scale management"),
@@ -355,6 +358,7 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
           runtime_plan_physical_level_operator_spec_path;
       physicalLevels.levelsPerLogicalLevel =
           runtime_plan_levels_per_logical_level;
+      physicalLevels.bootProfile = runtime_plan_boot_profile;
       pm.addNestedPass<func::FuncOp>(
           hecate::ckks::createMaterializePhysicalLevels(physicalLevels));
     }
@@ -590,7 +594,7 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       pm.addNestedPass<func::FuncOp>(
           hecate::earth::createGreedyBootstrapPlacement(
               {waterline, output_val,
-               bootstrap_strategy == BootstrapStrategy::DepthDP}));
+               bootstrap_strategy == BootstrapStrategy::DepthDP, bootstrap_scale}));
     } else {
       pm.addNestedPass<func::FuncOp>(
           hecate::earth::createBypassDetection({waterline, 0.5}));

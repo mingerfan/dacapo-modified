@@ -233,7 +233,8 @@ def NegateOp : Unary_Earth_Op<"negate", [SameOperandsAndResultType]> {
 }
 
 def BootstrapOp : Unary_Earth_Op<"bootstrap"> {
-  let arguments = (ins HETensor:$value, DefaultValuedAttr<I64Attr, "0">:$targetLevel);
+  let arguments = (ins HETensor:$value, DefaultValuedAttr<I64Attr, "0">:$targetLevel,
+                       DefaultValuedAttr<I64Attr, "0">:$targetScale);
   let results = (outs HETensor);
   code extraClassDeclaration = [{
     void processOperandsEVA(int64_t param);

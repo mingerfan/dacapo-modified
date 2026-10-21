@@ -28,20 +28,25 @@ struct GreedyBootstrapPlacementPass
     waterline = options.waterline;
     output_val = options.output_val;
     depth_dp = options.depth_dp;
+    bootstrap_scale = options.bootstrap_scale;
   }
 
   void runOnOperation() override {
     auto func = getOperation();
     const int64_t factor = EarthDialect::rescalingFactor;
+    const int64_t bootScale = bootstrap_scale ? bootstrap_scale.getValue() : factor;
+    const int64_t bootNormalizationLevels =
+        factor > 0 && bootScale >= waterline ? (bootScale - waterline) / factor : 0;
     const int64_t lastBootLevel = EarthDialect::bootstrapLevelUpperBound -
                                   EarthDialect::bootstrapLevelLowerBound;
     if (func.isExternal())
       return;
     if (!llvm::hasSingleElement(func.getBody()) || waterline <= 0 ||
-        waterline > factor || lastBootLevel < 2) {
+        factor <= 0 || bootScale < waterline ||
+        lastBootLevel <= bootNormalizationLevels) {
       func.emitError(
-          "greedy bootstrap requires one block, 0 < waterline <= "
-          "rescalingFactor, and at least two usable bootstrap levels");
+          "greedy bootstrap requires one block, positive scales/rescalingFactor, "
+          "Boot scale >= waterline and a usable bootstrap budget");
       return signalPassFailure();
     }
 
@@ -130,28 +135,72 @@ struct GreedyBootstrapPlacementPass
       for (int64_t i = 1; i <= maxDepth; ++i)
         crossing[i] += crossing[i - 1];
 
+      // Simulate the same EVA scale transitions used by emission. A multiply
+      // may need zero, one or several Rescales; multiplication depth alone is
+      // not a modulus budget.
+      llvm::stable_sort(operations, [&](Operation *a, Operation *b) {
+        return depths.lookup(a) < depths.lookup(b);
+      });
+      struct State { int64_t level, scale; };
       SmallVector<uint64_t> cost(maxDepth + 1,
                                  std::numeric_limits<uint64_t>::max());
       SmallVector<int64_t> previous(maxDepth + 1, -1);
-      // A bootstrap normalized back to the waterline already consumes one
-      // level. Fresh inputs have the full initial budget.
-      int64_t initialBudget = lastBootLevel;
-      for (auto arg : func.getArguments())
-        initialBudget = std::min(initialBudget,
-                                 lastBootLevel - getScaleType(arg).getLevel());
       cost[0] = 0;
-      for (int64_t end = 1; end <= maxDepth; ++end) {
-        if (end <= initialBudget)
-          cost[end] = 0;
-        for (int64_t start = end - 1;
-             start >= std::max<int64_t>(0, end - (lastBootLevel - 1));
-             --start) {
-          uint64_t candidate = cost[start] + crossing[start];
-          if (candidate < cost[end]) {
-            cost[end] = candidate;
-            previous[end] = start;
+      for (int64_t start = 0; start < maxDepth; ++start) {
+        if (cost[start] == std::numeric_limits<uint64_t>::max())
+          continue;
+        llvm::DenseMap<Value, State> states;
+        auto stateOf = [&](Value value) -> State {
+          auto it = states.find(value);
+          if (it != states.end()) return it->second;
+          if (start == 0) {
+            auto type = getScaleType(value);
+            return {static_cast<int64_t>(type.getLevel()), static_cast<int64_t>(type.getScale())};
+          }
+          return {bootNormalizationLevels,
+                  bootScale - bootNormalizationLevels * factor};
+        };
+        bool valid = true;
+        size_t next = 0;
+        while (start > 0 && next < operations.size() && depths.lookup(operations[next]) <= start)
+          ++next;
+        for (int64_t end = start + 1; end <= maxDepth && valid; ++end) {
+          while (next < operations.size() && depths.lookup(operations[next]) <= end) {
+            auto *op = operations[next++];
+            if (isa<ConstantOp, func::ReturnOp>(op)) continue;
+            State result{0, 0};
+            bool first = true;
+            for (Value input : op->getOperands()) {
+              if (!getScaleType(input).isCipher()) continue;
+              State operand = stateOf(input);
+              result.level = std::max(result.level, operand.level);
+              if (isa<MulOp>(op)) result.scale += operand.scale;
+              else result.scale = std::max(result.scale, operand.scale);
+              first = false;
+            }
+            if (first) { valid = false; break; }
+            if (auto mul = dyn_cast<MulOp>(op)) {
+              if (mul.isSingle()) result.scale += waterline;
+              while (result.scale >= waterline + factor) {
+                result.scale -= factor;
+                ++result.level;
+              }
+            }
+            if (result.level > lastBootLevel) { valid = false; break; }
+            for (Value output : op->getResults()) states[output] = result;
+          }
+          if (valid) {
+            uint64_t candidate = cost[start] + (start ? crossing[start] : 0);
+            if (candidate < cost[end]) {
+              cost[end] = candidate;
+              previous[end] = start ? start : -1;
+            }
           }
         }
+      }
+      if (cost[maxDepth] == std::numeric_limits<uint64_t>::max()) {
+        func.emitError("no feasible depth-DP placement for the EVA Q budget");
+        return signalPassFailure();
       }
       for (int64_t end = maxDepth; previous[end] >= 0;) {
         end = previous[end];
@@ -172,23 +221,16 @@ struct GreedyBootstrapPlacementPass
       return it == current.end() ? value : it->second;
     };
     auto normalize = [&](Value value) -> Value {
-      int64_t scale = getScaleType(value).getScale();
-      if (scale == waterline)
-        return value;
-      value = builder.create<UpscaleOp>(value.getLoc(), value,
-                                        factor + waterline - scale);
-      return builder.create<RescaleOp>(value.getLoc(), value);
+      while (getScaleType(value).getScale() >= waterline + factor)
+        value = builder.create<RescaleOp>(value.getLoc(), value);
+      return value;
     };
 
     uint64_t bootCount = 0, barriers = 0;
     size_t nextCut = 0;
     auto refresh = [&](Value logical) {
       auto value = resolve(logical);
-      auto type = getScaleType(value);
-      if (type.getScale() != factor)
-        value = builder.create<UpscaleOp>(value.getLoc(), value,
-                                          factor - type.getScale());
-      value = builder.create<BootstrapOp>(value.getLoc(), value);
+      value = builder.create<BootstrapOp>(value.getLoc(), value, 0, bootScale);
       current[logical] = normalize(value);
       ++bootCount;
     };
@@ -198,38 +240,46 @@ struct GreedyBootstrapPlacementPass
       if (depth_dp && nextCut < cuts.size() &&
           depths.lookup(op) > cuts[nextCut]) {
         ++barriers;
-        int64_t end = nextCut + 1 < cuts.size() ? cuts[nextCut + 1] : maxDepth;
-        int64_t safeLevel = lastBootLevel - (end - cuts[nextCut]);
+        // The segment simulation refreshes every crossing ciphertext. Keep
+        // emission identical: skipping a refresh could change both scale and
+        // the number of Rescales in the next segment.
         for (auto logical : live) {
-          auto value = resolve(logical);
-          auto type = getScaleType(value);
-          if (type.getLevel() > lastBootLevel || type.getScale() != waterline) {
-            op->emitError(
-                "live ciphertext exceeds the greedy bootstrap budget");
+          auto type = getScaleType(resolve(logical));
+          if (type.getLevel() > lastBootLevel) {
+            op->emitError("live ciphertext exceeds the bootstrap Q budget");
             return signalPassFailure();
           }
-          // A shortcut with enough remaining levels gains nothing from Boot.
-          if (type.getLevel() > safeLevel)
-            refresh(logical);
+          refresh(logical);
         }
         ++nextCut;
       }
       if (isa<MulOp>(op)) {
-        bool refreshed = false;
-        for (auto logical : logicalOperands) {
-          auto type = getScaleType(resolve(logical));
-          if (!type.isCipher() || type.getLevel() < lastBootLevel)
-            continue;
-          if (depth_dp || type.getLevel() > lastBootLevel) {
-            op->emitError(
-                "multiplication exceeds the bootstrap placement budget");
+        auto requiredLevel = [&]() {
+          int64_t level = 0, scale = 0;
+          for (Value logical : logicalOperands) {
+            auto type = getScaleType(resolve(logical));
+            if (type.isCipher()) {
+              level = std::max(level, static_cast<int64_t>(type.getLevel()));
+              scale += type.getScale();
+            } else scale += waterline;
+          }
+          return level + std::max<int64_t>(0, (scale - waterline) / factor);
+        };
+        if (requiredLevel() > lastBootLevel) {
+          if (depth_dp) {
+            op->emitError("multiplication exceeds the simulated bootstrap Q budget");
             return signalPassFailure();
           }
-          refresh(logical);
-          refreshed = true;
-        }
-        if (refreshed)
+          llvm::SetVector<Value> operands;
+          for (Value logical : logicalOperands)
+            if (getScaleType(resolve(logical)).isCipher()) operands.insert(logical);
+          for (Value logical : operands) refresh(logical);
           ++barriers;
+          if (requiredLevel() > lastBootLevel) {
+            op->emitError("multiplication cannot fit after Boot");
+            return signalPassFailure();
+          }
+        }
       }
 
       for (auto [index, logical] : llvm::enumerate(logicalOperands)) {
@@ -268,7 +318,14 @@ struct GreedyBootstrapPlacementPass
           live.insert(result);
     }
 
-    refineReturnValues(func, builder, inputTypes, waterline, output_val);
+    auto result = cast<func::ReturnOp>(func.front().getTerminator());
+    func.setFunctionType(builder.getFunctionType(inputTypes, result.getOperandTypes()));
+    func->setAttr("init_level", builder.getI64IntegerAttr(EarthDialect::bootstrapLevelUpperBound));
+    SmallVector<int64_t> inputScales, outputScales;
+    for (Value arg : func.getArguments()) inputScales.push_back(getScaleType(arg).getScale());
+    for (Value value : result.getOperands()) outputScales.push_back(getScaleType(value).getScale());
+    func->setAttr("arg_scale", builder.getDenseI64ArrayAttr(inputScales));
+    func->setAttr("res_scale", builder.getDenseI64ArrayAttr(outputScales));
     llvm::outs() << (depth_dp ? "Depth-DP" : "Greedy")
                  << " bootstrap boundaries: " << barriers << '\n'
                  << "Number of Bootstrapping: " << bootCount << '\n';

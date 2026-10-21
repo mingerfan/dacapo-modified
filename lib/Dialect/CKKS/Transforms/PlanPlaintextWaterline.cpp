@@ -55,6 +55,7 @@ struct PlanPlaintextWaterlinePass : ckks::impl::PlanPlaintextWaterlineBase<PlanP
       auto encode = cast<ckks::EncodeOp>(t.getInput().getDefiningOp());
       builder.setInsertionPoint(t);
       OperationState state(t.getLoc(), dist::PreparePlainOp::getOperationName());
+      if (auto scale = encode->getAttr("runtime.scale_log2")) state.addAttribute("runtime.scale_log2", scale);
       state.addTypes(t.getResult().getType());
       state.addAttribute("payload", encode.getPayload());
       for (auto attr : t->getAttrs())

@@ -45,6 +45,8 @@ struct EarlyModswitchPass
     auto &&bb = func.getBody().getBlocks().front();
     for (auto iter = bb.rbegin(); iter != bb.rend(); ++iter) {
       if (auto op = dyn_cast<hecate::earth::HEScaleOpInterface>(*iter)) {
+        if (op->getResult(0).use_empty())
+          continue;
 
         // Skip the bootstrapping operation
         if (auto oop =

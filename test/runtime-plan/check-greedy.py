@@ -133,13 +133,13 @@ def main():
             ("deep", source(12), 0.25 * 1.01 ** 12 + 0.25, True),
             ("cipher", source(12, True), 0.25 ** 13 + 0.25, True),
             ("fanout", fanout_source(8),
-             0.25 + 0.25 * 1.01 ** 3 * sum(1.02 + i / 100 for i in range(8)), True),
+             0.25 + 0.25 * 1.01 ** 3 * sum(1.02 + i / 100 for i in range(8)), False),
             ("reduction", reduction_source(8),
              (0.25 + 0.25 * 1.01 ** 2 * sum(1.02 + i / 100 for i in range(8))) * 1.01,
-             True),
+             False),
             ("exhausted_input", source(1).replace("ci<0 * 0>", "ci<0 * 3>")
              .replace("pl<0 * 0>", "pl<0 * 3>"),
-             0.25 * 1.01 + 0.25, True),
+             0.25 * 1.01 + 0.25, False),
         ]
         for seed in range(5):
             text, expected = mixed_source(seed)
@@ -207,12 +207,11 @@ def main():
             if name == "fanout":
                 fanout_boots[strategy] = boots
             if name == "reduction" and strategy == "depth-dp":
-                # Refresh the completed reduction, never its eight products.
-                assert boots == 1
-                assert math.isclose(boot_values[0], expected / 1.01, rel_tol=1e-12)
+                # Threshold rescaling fits this reduction without a refresh.
+                assert boots == 0
 
-        assert fanout_boots["depth-dp"] == 1, fanout_boots
-        assert fanout_boots["depth-dp"] < fanout_boots["greedy"], fanout_boots
+        assert fanout_boots["depth-dp"] == 0, fanout_boots
+        assert fanout_boots["depth-dp"] <= fanout_boots["greedy"], fanout_boots
 
         # Frontend-style canonicalization has no selected runtime slot capacity.
         traced.write_text(mask_source(8, 1))
@@ -249,13 +248,13 @@ def main():
                             for index, value in enumerate(original)]
                 assert decoded[plan["final_outputs"][0]] == expected, (strategy, length, sign)
 
-        config["bootstrapLevelUpperBound"] = 2
+        config["bootstrapLevelUpperBound"] = 1
         profile.write_text(json.dumps(config))
         command = ["--boot-placement=depth-dp" if arg.startswith("--boot-placement=")
                    else arg for arg in command]
         result = subprocess.run(command, capture_output=True, text=True)
         assert result.returncode != 0
-        assert "at least two usable bootstrap levels" in result.stderr
+        assert "usable bootstrap budget" in result.stderr
     print("Lazy/depth-DP chains, residuals, shared inputs, fanout, and budget checks passed")
 
 

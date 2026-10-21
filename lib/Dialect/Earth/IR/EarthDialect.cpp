@@ -275,7 +275,10 @@ void hecate::earth::BootstrapOp::getCanonicalizationPatterns(
   if (lScale.getLevel() <=
       hecate::earth::EarthDialect::bootstrapLevelUpperBound -
           hecate::earth::EarthDialect::bootstrapLevelLowerBound) {
-    inferredReturnTypes.push_back(lScale.switchLevel(op.getTargetLevel()));
+    auto result = lScale.switchLevel(op.getTargetLevel());
+    if (op.getTargetScale() > 0)
+      result = result.switchScale(op.getTargetScale());
+    inferredReturnTypes.push_back(result);
     return ::mlir::success();
   } else
     return ::mlir::failure();
@@ -323,9 +326,7 @@ void hecate::earth::MulOp::getCanonicalizationPatterns(
   auto rScale = earth::getScaleType(op.getRhs());
   auto rTensor = earth::getTensorType(op.getRhs());
   if (lScale.getLevel() == rScale.getLevel() &&
-      lTensor.getShape()[0] == rTensor.getShape()[0] &&
-      ((EarthDialect::bootstrapLevelUpperBound)*EarthDialect::rescalingFactor >=
-       lScale.getLevel() * EarthDialect::rescalingFactor + lScale.getScale())) {
+      lTensor.getShape()[0] == rTensor.getShape()[0]) {
     inferredReturnTypes.push_back(
         lScale.switchScale(lScale.getScale() + rScale.getScale()).toCipher());
     return ::mlir::success();

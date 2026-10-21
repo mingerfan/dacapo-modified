@@ -31,6 +31,11 @@ public:
       data[i] = static_cast<char>(bits >> (8 * i));
     bytes(data, sizeof(T));
   }
+  void real(double value) {
+    uint64_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    number(bits);
+  }
   void text(const std::string &value) {
     if (value.size() > 1024 * 1024) {
       fail("binary string exceeds 1 MiB");
@@ -131,7 +136,8 @@ public:
       place(r.at("place"));
       stringRef(r.at("context"));
       i32(r.at("level"));
-      i32(r.at("scale_log2"));
+      if (metadata.value("format_version", 1) >= 5) wire.real(r.at("scale_log2").get<double>());
+      else i32(r.at("scale_log2"));
       wire.number<uint8_t>(r.at("ntt").get<bool>());
       i32(r.at("components"));
     } else if (array == "external_inputs" || array == "final_outputs")
@@ -267,7 +273,9 @@ private:
           i32(a.at("steps"));
         else {
           i32(a.at("target_level"));
-          if (attrs == 2 || attrs == 4)
+          if (attrs == 2 && metadata.value("format_version", 1) >= 5)
+            wire.real(a.at("target_scale_log2").get<double>());
+          else if (attrs == 2 || attrs == 4)
             i32(a.at("target_scale_log2"));
           if (attrs == 4) {
             i32(a.at("target_components"));

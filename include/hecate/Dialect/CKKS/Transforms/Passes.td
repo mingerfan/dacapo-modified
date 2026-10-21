@@ -64,6 +64,8 @@ def MaterializePhysicalLevels : Pass<"materialize-ckks-physical-levels",
   let options = [
     Option<"operatorSpecPath", "operator-spec", "std::string",
            /*default=*/[{""}], "Target OperatorSpec V1 or V2 JSON">,
+    Option<"bootProfile", "boot-profile", "std::string",
+           /*default=*/[{""}], "Anchor the working chain at this Boot profile's output level">,
     Option<"levelsPerLogicalLevel", "levels-per-logical-level", "int64_t",
            /*default=*/[{4}],
            "Physical RNS levels consumed by one logical level">

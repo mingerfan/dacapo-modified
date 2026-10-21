@@ -1,5 +1,11 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+add_test(NAME DacapoNativeScale40
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-native-scale40.py
+          --hecate-opt $<TARGET_FILE:hecate-opt>
+          --source-dir ${PROJECT_SOURCE_DIR})
+
 add_test(NAME DacapoRuntimePlanBinary
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-binary.py
