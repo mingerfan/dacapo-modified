@@ -4,6 +4,7 @@
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/raw_ostream.h"
@@ -49,6 +50,12 @@ struct GreedyBootstrapPlacementPass
           "Boot scale >= waterline and a usable bootstrap budget");
       return signalPassFailure();
     }
+
+    // Dead branches must not create depth cuts that refresh live outputs.
+    // Reverse order removes a whole dead def-use chain in one traversal.
+    for (auto &op : llvm::make_early_inc_range(llvm::reverse(func.front())))
+      if (isOpTriviallyDead(&op))
+        op.erase();
 
     // Keep the original use counts: the management operations inserted below
     // must not extend the lifetime of a logical value in this scan.
@@ -146,9 +153,14 @@ struct GreedyBootstrapPlacementPass
                                  std::numeric_limits<uint64_t>::max());
       SmallVector<int64_t> previous(maxDepth + 1, -1);
       cost[0] = 0;
-      for (int64_t start = 0; start < maxDepth; ++start) {
-        if (cost[start] == std::numeric_limits<uint64_t>::max())
+      // Also consider refreshing the depth-zero frontier before the first
+      // multiply. Inputs can already have consumed the entire Q budget.
+      // The virtual start -1 represents this initial refresh; start 0 keeps
+      // the original input states.
+      for (int64_t start = -1; start < maxDepth; ++start) {
+        if (start >= 0 && cost[start] == std::numeric_limits<uint64_t>::max())
           continue;
+        const int64_t cut = std::max<int64_t>(start, 0);
         llvm::DenseMap<Value, State> states;
         auto stateOf = [&](Value value) -> State {
           auto it = states.find(value);
@@ -162,9 +174,9 @@ struct GreedyBootstrapPlacementPass
         };
         bool valid = true;
         size_t next = 0;
-        while (start > 0 && next < operations.size() && depths.lookup(operations[next]) <= start)
+        while (start != 0 && next < operations.size() && depths.lookup(operations[next]) <= cut)
           ++next;
-        for (int64_t end = start + 1; end <= maxDepth && valid; ++end) {
+        for (int64_t end = cut + 1; end <= maxDepth && valid; ++end) {
           while (next < operations.size() && depths.lookup(operations[next]) <= end) {
             auto *op = operations[next++];
             if (isa<ConstantOp, func::ReturnOp>(op)) continue;
@@ -190,10 +202,11 @@ struct GreedyBootstrapPlacementPass
             for (Value output : op->getResults()) states[output] = result;
           }
           if (valid) {
-            uint64_t candidate = cost[start] + (start ? crossing[start] : 0);
+            uint64_t candidate = start < 0 ? crossing[0]
+                                          : cost[start] + (start ? crossing[start] : 0);
             if (candidate < cost[end]) {
               cost[end] = candidate;
-              previous[end] = start ? start : -1;
+              previous[end] = start < 0 ? 0 : (start ? start : -1);
             }
           }
         }
