@@ -192,7 +192,7 @@ struct GreedyBootstrapPlacementPass
             }
             if (first) { valid = false; break; }
             if (auto mul = dyn_cast<MulOp>(op)) {
-              if (mul.isSingle()) result.scale += waterline;
+              if (mul.isSingle()) result.scale += plaintextScaleForMul(mul, waterline);
               while (result.scale >= waterline + factor) {
                 result.scale -= factor;
                 ++result.level;
@@ -272,7 +272,7 @@ struct GreedyBootstrapPlacementPass
             if (type.isCipher()) {
               level = std::max(level, static_cast<int64_t>(type.getLevel()));
               scale += type.getScale();
-            } else scale += waterline;
+            } else scale += plaintextScaleForMul(cast<MulOp>(op), waterline);
           }
           return level + std::max<int64_t>(0, (scale - waterline) / factor);
         };
@@ -295,14 +295,10 @@ struct GreedyBootstrapPlacementPass
 
       for (auto [index, logical] : llvm::enumerate(logicalOperands)) {
         auto value = resolve(logical);
-        // A plaintext's encoding scale/level is local to its consumer.
-        if (auto constant = value.getDefiningOp<ConstantOp>();
-            constant && !value.hasOneUse())
-          value = builder.clone(*constant.getOperation())->getResult(0);
         op->setOperand(index, value);
       }
       if (auto forward = dyn_cast<ForwardMgmtInterface>(op)) {
-        forward.processOperandsEVA(waterline);
+        prepareThresholdOperands(forward, waterline);
         auto inference = cast<InferTypeOpInterface>(op);
         SmallVector<Type> types;
         if (failed(inference.inferReturnTypes(

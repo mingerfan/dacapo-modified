@@ -129,6 +129,23 @@ def RemoveBootstrap : Pass<"remove-bootstrap", "::mlir::func::FuncOp"> {
     This pass removes manually inserted bootstrapping operation.
   }];
 }
+def OptimizePolynomialArithmetic : Pass<"optimize-polynomial-arithmetic", "::mlir::func::FuncOp"> {
+  let summary = "Simplify full-slot doubling and bound scalar coefficient encoding";
+  let options = [
+    Option<"coefficient_min_scale", "coefficient-min-scale", "int64_t", "30",
+           "Minimum scalar encoding scale; zero retains the default scale">,
+    Option<"coefficient_precision_bits", "coefficient-precision-bits", "int64_t", "24",
+           "Minimum magnitude bits in a nonzero scalar encoding coefficient">,
+    Option<"absorb_alignment", "absorb-alignment", "bool", "true",
+           "Absorb later scale alignment into coefficient encodings">
+  ];
+}
+def AbsorbCoefficientScale : Pass<"absorb-coefficient-scale", "::mlir::func::FuncOp"> {
+  let summary = "Absorb alignment through single-use Rescale and ModSwitch chains";
+  let options = [
+    Option<"waterline", "waterline", "int64_t", "40", "Scale management waterline">
+  ];
+}
 def FlexibleBootstrap : Pass<"flexible-bootstrap", "::mlir::func::FuncOp"> {
   let summary = "Change bootstrapping target level as required";
   let description = [{

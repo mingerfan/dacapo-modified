@@ -47,6 +47,7 @@ struct DaCapoPlannerPass
     pm.addNestedPass<func::FuncOp>(hecate::earth::createProactiveRescaling(
         {waterline, output_val, bootstrap_scale}));
     pm.addNestedPass<func::FuncOp>(hecate::earth::createEarlyModswitch());
+    pm.addNestedPass<func::FuncOp>(hecate::earth::createAbsorbCoefficientScale({waterline}));
     pm.addPass(createCanonicalizerPass());
     pm.addPass(createCSEPass());
     pm.addNestedPass<func::FuncOp>(hecate::earth::createLatencyEstimator());

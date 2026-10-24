@@ -212,6 +212,20 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       "bootstrap-scale", cl::desc("Greedy/depth-DP Boot input/output scale; zero uses the legacy scale"),
       cl::init(0)};
 
+  enum class PolynomialOptimization { None, Double, DoubleAlign, All };
+  static cl::opt<PolynomialOptimization> polynomial_optimization{
+      "polynomial-optimizations", cl::desc("Scalar polynomial arithmetic optimizations"),
+      cl::values(
+          clEnumValN(PolynomialOptimization::None, "none", "Retain original arithmetic"),
+          clEnumValN(PolynomialOptimization::Double, "double", "Replace full-slot multiply by two with addition"),
+          clEnumValN(PolynomialOptimization::DoubleAlign, "double-align", "Also absorb coefficient scale alignment"),
+          clEnumValN(PolynomialOptimization::All, "all", "Also select scalar encoding scales with precision bounds")),
+      cl::init(PolynomialOptimization::DoubleAlign)};
+  static cl::opt<int64_t> coefficient_min_scale{
+      "coefficient-min-scale", cl::desc("Minimum scalar coefficient encoding scale"), cl::init(30)};
+  static cl::opt<int64_t> coefficient_precision_bits{
+      "coefficient-precision-bits", cl::desc("Minimum nonzero scalar encoding magnitude bits"), cl::init(24)};
+
   static cl::opt<int64_t> output_val{
       "output-val", cl::desc("Output value upper bound  of scale management"),
       cl::init(10)};
@@ -578,7 +592,18 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
         addRuntimePlanExport(pm, (std::filesystem::path(dir) / stem).string());
       });
 
-  auto addDaCapoPrecompile = [&](OpPassManager &pm) {
+  auto addPolynomialOptimization = [&](OpPassManager &pm) {
+    if (polynomial_optimization == PolynomialOptimization::None)
+      return;
+    hecate::earth::OptimizePolynomialArithmeticOptions options;
+    options.coefficient_min_scale =
+        polynomial_optimization == PolynomialOptimization::All ? coefficient_min_scale.getValue() : 0;
+    options.coefficient_precision_bits = coefficient_precision_bits;
+    options.absorb_alignment = polynomial_optimization != PolynomialOptimization::Double;
+    pm.addNestedPass<func::FuncOp>(hecate::earth::createOptimizePolynomialArithmetic(options));
+  };
+
+  auto addDaCapoPrecompile = [&, addPolynomialOptimization](OpPassManager &pm) {
     std::string dir;
     std::string stem;
     if (outputFilename != "-") {
@@ -586,10 +611,10 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       stem = outputName.stem();
       dir = outputName.parent_path();
     }
+    pm.addNestedPass<func::FuncOp>(hecate::earth::createRemoveBootstrap());
+    addPolynomialOptimization(pm);
     if (enable_check_smu)
       pm.addPass(hecate::earth::createSMUChecker());
-
-    pm.addNestedPass<func::FuncOp>(hecate::earth::createRemoveBootstrap());
     if (bootstrap_strategy != BootstrapStrategy::Optimized) {
       pm.addNestedPass<func::FuncOp>(
           hecate::earth::createGreedyBootstrapPlacement(
@@ -610,6 +635,7 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
     /* pm.addNestedPass<func::FuncOp>( */
     /*     hecate::earth::createSNRRescaling({waterline, output_val})); */
     pm.addNestedPass<func::FuncOp>(hecate::earth::createEarlyModswitch());
+    pm.addNestedPass<func::FuncOp>(hecate::earth::createAbsorbCoefficientScale({waterline}));
     pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createCSEPass());
 
@@ -665,7 +691,7 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       });
   PassPipelineRegistration<>(
       "pars", "Perform Scale Management on bootstrapped models",
-      [&, addRuntimePlanExport](OpPassManager &pm) {
+      [&, addRuntimePlanExport, addPolynomialOptimization](OpPassManager &pm) {
         std::string dir;
         std::string stem;
         if (outputFilename != "-") {
@@ -673,12 +699,14 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
           stem = outputName.stem();
           dir = outputName.parent_path();
         }
+        addPolynomialOptimization(pm);
         if (enable_check_smu)
           pm.addPass(hecate::earth::createSMUChecker());
 
         pm.addNestedPass<func::FuncOp>(hecate::earth::createProactiveRescaling(
             {waterline, output_val, bootstrap_scale}));
         pm.addNestedPass<func::FuncOp>(hecate::earth::createEarlyModswitch());
+        pm.addNestedPass<func::FuncOp>(hecate::earth::createAbsorbCoefficientScale({waterline}));
 
         if (enable_check_smu)
           pm.addPass(hecate::earth::createSMUChecker());
