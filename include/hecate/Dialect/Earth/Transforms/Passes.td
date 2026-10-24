@@ -130,12 +130,8 @@ def RemoveBootstrap : Pass<"remove-bootstrap", "::mlir::func::FuncOp"> {
   }];
 }
 def OptimizePolynomialArithmetic : Pass<"optimize-polynomial-arithmetic", "::mlir::func::FuncOp"> {
-  let summary = "Simplify full-slot doubling and bound scalar coefficient encoding";
+  let summary = "Simplify full-slot doubling and enable coefficient alignment absorption";
   let options = [
-    Option<"coefficient_min_scale", "coefficient-min-scale", "int64_t", "30",
-           "Minimum scalar encoding scale; zero retains the default scale">,
-    Option<"coefficient_precision_bits", "coefficient-precision-bits", "int64_t", "24",
-           "Minimum magnitude bits in a nonzero scalar encoding coefficient">,
     Option<"absorb_alignment", "absorb-alignment", "bool", "true",
            "Absorb later scale alignment into coefficient encodings">
   ];

@@ -109,7 +109,7 @@ Runtime zero-pads short constants. Prefix ones/minus-ones remain masks; only ful
 
 `--dacapo`, `--dacapo-precompile` and `--pars` default to `--polynomial-optimizations=double-align`. Before planning, full-slot constants exactly equal to two multiply ciphertexts by self-addition. After scale management, alignment is absorbed into a single-use coefficient product, including through Rescale and ModSwitch chains, when the result remains below the immediate Rescale threshold. Shared intermediates and fixed scale-management operations keep their original state. Existing traces can be reused; Boot schedules and CKKS checkpoints must be regenerated.
 
-For compiler comparisons, `none` retains the original arithmetic and `double` enables only doubling simplification. Experimental `all` also chooses encoding scales for full-slot uniform real coefficients: `--coefficient-min-scale=30` and `--coefficient-precision-bits=24` require at least 30 scale bits and 24 magnitude bits in the scalar encoding. Coefficients which cannot meet that bound below the original waterline retain their original encoding. This is a local scalar rounding constraint, not an end-to-end CKKS accuracy guarantee. Analysis and emission use the same per-operation choice. It can change Boot placement unfavorably and is not enabled by default.
+For compiler comparisons, `none` retains the original arithmetic and `double` enables only doubling simplification. Ordinary coefficient products use the scale-management waterline for plaintext encoding; alignment absorption can raise that encoding scale to eliminate a separate alignment multiplication.
 
 ## Papers
 

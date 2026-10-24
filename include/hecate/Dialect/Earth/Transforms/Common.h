@@ -24,7 +24,6 @@ void inferTypeForward(hecate::earth::ForwardMgmtInterface sop);
 // Logical levels count consumed Q. Each threshold Rescale consumes one Q;
 // Boot starts a new chain with its explicitly selected output scale.
 int64_t bootstrapQBudget();
-int64_t plaintextScaleForMul(MulOp op, int64_t waterline);
 void prepareThresholdOperands(ForwardMgmtInterface op, int64_t waterline);
 mlir::Value normalizeScale(mlir::Value value, mlir::OpBuilder &builder,
                            int64_t waterline, bool replaceUses = false);

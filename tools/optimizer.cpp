@@ -212,19 +212,14 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       "bootstrap-scale", cl::desc("Greedy/depth-DP Boot input/output scale; zero uses the legacy scale"),
       cl::init(0)};
 
-  enum class PolynomialOptimization { None, Double, DoubleAlign, All };
+  enum class PolynomialOptimization { None, Double, DoubleAlign };
   static cl::opt<PolynomialOptimization> polynomial_optimization{
       "polynomial-optimizations", cl::desc("Scalar polynomial arithmetic optimizations"),
       cl::values(
           clEnumValN(PolynomialOptimization::None, "none", "Retain original arithmetic"),
           clEnumValN(PolynomialOptimization::Double, "double", "Replace full-slot multiply by two with addition"),
-          clEnumValN(PolynomialOptimization::DoubleAlign, "double-align", "Also absorb coefficient scale alignment"),
-          clEnumValN(PolynomialOptimization::All, "all", "Also select scalar encoding scales with precision bounds")),
+          clEnumValN(PolynomialOptimization::DoubleAlign, "double-align", "Also absorb coefficient scale alignment")),
       cl::init(PolynomialOptimization::DoubleAlign)};
-  static cl::opt<int64_t> coefficient_min_scale{
-      "coefficient-min-scale", cl::desc("Minimum scalar coefficient encoding scale"), cl::init(30)};
-  static cl::opt<int64_t> coefficient_precision_bits{
-      "coefficient-precision-bits", cl::desc("Minimum nonzero scalar encoding magnitude bits"), cl::init(24)};
 
   static cl::opt<int64_t> output_val{
       "output-val", cl::desc("Output value upper bound  of scale management"),
@@ -596,9 +591,6 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
     if (polynomial_optimization == PolynomialOptimization::None)
       return;
     hecate::earth::OptimizePolynomialArithmeticOptions options;
-    options.coefficient_min_scale =
-        polynomial_optimization == PolynomialOptimization::All ? coefficient_min_scale.getValue() : 0;
-    options.coefficient_precision_bits = coefficient_precision_bits;
     options.absorb_alignment = polynomial_optimization != PolynomialOptimization::Double;
     pm.addNestedPass<func::FuncOp>(hecate::earth::createOptimizePolynomialArithmetic(options));
   };

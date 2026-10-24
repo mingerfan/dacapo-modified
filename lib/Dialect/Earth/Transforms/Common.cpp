@@ -10,12 +10,6 @@ int64_t hecate::earth::bootstrapQBudget() {
          EarthDialect::bootstrapLevelLowerBound;
 }
 
-int64_t hecate::earth::plaintextScaleForMul(MulOp op, int64_t waterline) {
-  if (auto minimum = op->getAttrOfType<IntegerAttr>("coefficient_min_scale"))
-    return std::min(waterline, minimum.getInt());
-  return waterline;
-}
-
 void hecate::earth::prepareThresholdOperands(ForwardMgmtInterface op,
                                              int64_t waterline) {
   OpBuilder builder(op);
@@ -24,11 +18,6 @@ void hecate::earth::prepareThresholdOperands(ForwardMgmtInterface op,
         constant && !constant->getResult(0).hasOneUse())
       operand.set(builder.clone(*constant)->getResult(0));
   op.processOperandsEVA(waterline);
-  if (auto mul = dyn_cast<MulOp>(op.getOperation()))
-    for (Value operand : mul->getOperands())
-      if (!getScaleType(operand).isCipher())
-        operand.setType(getScaleType(operand).switchScale(
-            plaintextScaleForMul(mul, waterline)));
 }
 
 Value hecate::earth::normalizeScale(Value value, OpBuilder &builder,

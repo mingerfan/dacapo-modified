@@ -192,7 +192,7 @@ struct GreedyBootstrapPlacementPass
             }
             if (first) { valid = false; break; }
             if (auto mul = dyn_cast<MulOp>(op)) {
-              if (mul.isSingle()) result.scale += plaintextScaleForMul(mul, waterline);
+              if (mul.isSingle()) result.scale += waterline;
               while (result.scale >= waterline + factor) {
                 result.scale -= factor;
                 ++result.level;
@@ -272,7 +272,7 @@ struct GreedyBootstrapPlacementPass
             if (type.isCipher()) {
               level = std::max(level, static_cast<int64_t>(type.getLevel()));
               scale += type.getScale();
-            } else scale += plaintextScaleForMul(cast<MulOp>(op), waterline);
+            } else scale += waterline;
           }
           return level + std::max<int64_t>(0, (scale - waterline) / factor);
         };

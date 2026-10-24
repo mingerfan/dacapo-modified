@@ -2,8 +2,6 @@
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
-#include <algorithm>
-#include <cmath>
 
 namespace hecate::earth {
 #define GEN_PASS_DEF_OPTIMIZEPOLYNOMIALARITHMETIC
@@ -21,8 +19,6 @@ struct OptimizePolynomialArithmeticPass
   OptimizePolynomialArithmeticPass() = default;
   OptimizePolynomialArithmeticPass(
       OptimizePolynomialArithmeticOptions options) {
-    coefficient_min_scale = options.coefficient_min_scale;
-    coefficient_precision_bits = options.coefficient_precision_bits;
     absorb_alignment = options.absorb_alignment;
   }
 
@@ -30,10 +26,6 @@ struct OptimizePolynomialArithmeticPass
     auto func = getOperation();
     if (func.isExternal() || func->hasAttr("init_level"))
       return;
-    if (coefficient_min_scale < 0 || coefficient_precision_bits <= 0) {
-      func.emitError("invalid coefficient encoding precision limits");
-      return signalPassFailure();
-    }
     if (absorb_alignment)
       func->setAttr("absorb_coefficient_scale",
                     UnitAttr::get(func.getContext()));
@@ -55,30 +47,16 @@ struct OptimizePolynomialArithmeticPass
         return;
       auto payload = dyn_cast<DenseFPElementsAttr>(constant.getValue());
       // Runtime zero-pads a short payload. It must never become a full-slot
-      // doubling, nor use the scalar encoding error bound below.
+      // doubling.
       if (!payload || !payload.isSplat() ||
           payload.getNumElements() != EarthDialect::polynomialDegree / 2)
         return;
       double coefficient = payload.getSplatValue<APFloat>().convertToDouble();
-      if (!std::isfinite(coefficient))
-        return;
       if (coefficient == 2.0 && getScaleType(cipher).getScale() == 0 &&
           getScaleType(plain).getScale() == 0) {
         rewriter.setInsertionPoint(mul);
         rewriter.replaceOpWithNewOp<AddOp>(mul, cipher, cipher);
-        return;
       }
-      if (!coefficient_min_scale || coefficient == 0 ||
-          std::abs(coefficient) == 1)
-        return;
-      // For a uniform real slot constant the only nonzero encoding
-      // coefficient is c*2^s. Require at least precision_bits magnitude bits.
-      // This is a local encoding bound, not an end-to-end CKKS error guarantee.
-      int64_t minimum = std::max<int64_t>(
-          coefficient_min_scale, std::ceil(coefficient_precision_bits -
-                                           std::log2(std::abs(coefficient))));
-      mul->setAttr("coefficient_min_scale",
-                   rewriter.getI64IntegerAttr(minimum));
     });
     for (auto &op : llvm::make_early_inc_range(llvm::reverse(func.front())))
       if (isOpTriviallyDead(&op))
