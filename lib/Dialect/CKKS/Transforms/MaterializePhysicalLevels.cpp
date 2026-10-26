@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cmath>
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Support/MathExtras.h"
 #include <fstream>
 #include <limits>
 #include <optional>
@@ -172,12 +173,16 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
       func.emitError("native Rescale requires the actual rns_moduli chain");
       return failure();
     }
-    for (const auto &q : *actual) {
+    for (const auto &[i, q] : llvm::enumerate(*actual)) {
       if (!q.is_number_integer() || q.get<int64_t>() <= 1 || q.get<int64_t>() >= (int64_t{1} << 53)) {
         func.emitError("native Rescale moduli must be integers in (1, 2^53)");
         return failure();
       }
       result.moduli.push_back(q.get<int64_t>());
+      if (llvm::Log2_64(q.get<uint64_t>()) + 1 != result.modulusBits[i]) {
+        func.emitError("native Rescale modulus value does not match its declared bit width");
+        return failure();
+      }
     }
     if (levelFactor != 1) {
       func.emitError("native Rescale requires one physical Q per logical level");
@@ -419,14 +424,6 @@ struct MaterializePhysicalLevelsPass
       }
       if (!anchor || anchor.getInt() != static_cast<int64_t>(spec->upperBound)) {
         func.emitError("native scale-planning Boot anchor disagrees with physical-level OperatorSpec");
-        return signalPassFailure();
-      }
-      // Mixed-width admission is a separate change. This step updates scale
-      // planning and its verification for the existing equal-width native path.
-      if (!llvm::all_of(spec->modulusBits, [&](uint64_t bits) {
-            return bits == spec->modulusBits.front();
-          })) {
-        func.emitError("native physical-level validation still requires equal-width Q");
         return signalPassFailure();
       }
     }

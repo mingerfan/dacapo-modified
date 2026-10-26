@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""Check actual-prime scale/Boot planning before physical-level validation.
+"""Check actual-prime scale/Boot planning and mixed-width physical replay.
 
-The mixed-width tests exercise only dacapo-precompile. The public generator
-and native physical-level validation still require equal-width Q in this step.
 No GPU, encryption, or CKKS accuracy claims are involved.
 """
 import argparse
@@ -148,7 +146,7 @@ def main():
         assert result.returncode == 0, result.stderr
         checks += 1
         spec_text = (out/'spec.json').read_text()
-        spec = json.loads(spec_text); spec['context']['rns_moduli'][0] += 2
+        spec = json.loads(spec_text); spec['context']['rns_moduli'][0] -= 2
         (out/'spec.json').write_text(json.dumps(spec))
         result = physical()
         assert result.returncode != 0 and 'chain disagrees' in result.stderr, result.stderr
@@ -171,7 +169,13 @@ def main():
         checks += 1
         compile_case(mixed, 2, 8, 'greedy')
         result = physical()
-        assert result.returncode != 0 and 'still requires equal-width Q' in result.stderr, result.stderr
+        assert result.returncode == 0, result.stderr
+        checks += 1
+        spec = json.loads((out/'spec.json').read_text())
+        spec['context']['rns_moduli_log2'][0] += 1
+        (out/'spec.json').write_text(json.dumps(spec))
+        result = physical()
+        assert result.returncode != 0 and 'declared bit width' in result.stderr, result.stderr
         checks += 1
     print(f'{checks} actual-prime planning cases passed')
 
