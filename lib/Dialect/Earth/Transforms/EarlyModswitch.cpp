@@ -11,6 +11,7 @@
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Dialect/Earth/IR/HEParameterInterface.h"
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
+#include "hecate/Dialect/Earth/Transforms/Common.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -53,6 +54,11 @@ struct EarlyModswitchPass
                 dyn_cast<hecate::earth::BootstrapOp>(op.getOperation())) {
           continue; // Go to next operation
         }
+        // Moving a drop across Rescale changes which actual prime is divided
+        // out and invalidates the scale used by Boot feasibility analysis.
+        if (hecate::earth::usesNativeScalePlanning() &&
+            isa<hecate::earth::RescaleOp>(op.getOperation()))
+          continue;
 
         // Gather the users and finds the minimum "downFactor"
         uint64_t minModFactor = -1;

@@ -97,6 +97,11 @@ struct BypassDetectionPass
       auto type = hecate::earth::getScaleType(argument);
       argument.setType(type.switchScale(waterline));
     }
+    if (hecate::earth::usesNativeScalePlanning()) {
+      copy->setAttr("earth.arg_scales", builder.getDenseF64ArrayAttr(
+          SmallVector<double>(copy.getNumArguments(), static_cast<double>(waterline))));
+      hecate::earth::clearActualScales(copy);
+    }
     SmallVector<hecate::earth::ForwardMgmtInterface> operations;
     copy.walk([&](hecate::earth::ForwardMgmtInterface op) {
       operations.push_back(op);
@@ -106,7 +111,8 @@ struct BypassDetectionPass
                               : hecate::earth::EarthDialect::rescalingFactor;
     for (auto op : operations) {
       auto id = hecate::getIntegerAttr("opid", op->getResult(0));
-      if (!isa<hecate::earth::BootstrapOp>(op) && id < from)
+      if (!isa<hecate::earth::BootstrapOp>(op) &&
+          (id < from || (hecate::earth::usesNativeScalePlanning() && from && id == from)))
         continue;
       auto result = hecate::earth::applyThresholdScale(op, waterline, scale);
       if (failed(result)) {

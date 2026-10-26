@@ -596,6 +596,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
   };
 
   auto addDaCapoPrecompile = [&, addPolynomialOptimization](OpPassManager &pm) {
+    earth::EarthDialect::setNativeScaleParameters(
+        runtime_plan_physical_level_operator_spec_path, runtime_plan_boot_profile);
     std::string dir;
     std::string stem;
     if (outputFilename != "-") {

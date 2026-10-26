@@ -109,8 +109,10 @@ struct AbsorbCoefficientScalePass
       int64_t increase = upscale.getUpFactor();
       // Raising a normalized result below the threshold preserves exactly the
       // original number of immediate Rescales. Do not silently defer a drop.
-      if (getScaleType(upscale.getResult()).getScale() >=
-          waterline + EarthDialect::rescalingFactor)
+      auto result = upscale.getResult();
+      auto normalized = normalizeScaleState(
+          {static_cast<int64_t>(getScaleType(result).getLevel()), actualScale(result)}, waterline);
+      if (normalized.level > getScaleType(result).getLevel())
         return;
       rewriter.setInsertionPoint(mul);
       auto copy = rewriter.create<ConstantOp>(
@@ -128,6 +130,7 @@ struct AbsorbCoefficientScalePass
             getScaleType(result).getScale() + increase));
       }
       rewriter.replaceOp(upscale, upscale.getValue());
+      if (usesNativeScalePlanning()) clearActualScales(func);
     });
   }
 };

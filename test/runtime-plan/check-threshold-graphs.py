@@ -50,7 +50,7 @@ class Graph:
                             -a[0] if kind == 'negate' else a[0])
         return [values[v] for v in self.outputs]
 
-    def minimum_boots(self, budget, boot_scale, exhausted):
+    def minimum_boots(self, budget, boot_scale, exhausted, moduli):
         # Enumerate ALL depth-boundary subsets (including boundary zero).
         # Small DAGs keep this independent of the compiler's DP recurrence.
         needed = set(self.outputs)
@@ -77,8 +77,16 @@ class Graph:
                 depth[name] = min(depth[user] for user in uses[name])
         ordered = sorted(active, key=lambda row: depth[row[0]])
         best = math.inf
+        anchor = 4 + budget
+        def normalize(level, scale, nominal):
+            while level <= anchor and scale - math.log2(moduli[anchor-level]) >= 40:
+                scale -= math.log2(moduli[anchor-level])
+                level += 1
+                nominal = math.ceil(scale)
+            return level, scale, nominal
+        refreshed = normalize(0, boot_scale, boot_scale)
         for mask in range(1 << maximum):
-            states = dict(x=(exhausted, 40), y=(exhausted, 40))
+            states = dict(x=(exhausted, 40., 40), y=(exhausted, 40., 40))
             cost, valid = 0, True
             for current_depth in range(maximum + 2):
                 if current_depth and mask & (1 << (current_depth - 1)):
@@ -86,22 +94,23 @@ class Graph:
                     crossing = [v for v in states if any(depth[u] > cut for u in uses[v])]
                     cost += len(crossing)
                     for v in crossing:
-                        states[v] = ((boot_scale - 40) // 30,
-                                     40 + (boot_scale - 40) % 30)
+                        states[v] = refreshed
                 for name, kind, inputs in ordered:
                     if depth[name] != current_depth:
                         continue
                     operands = [states[v] for v in inputs if v != 'p']
-                    level = max(e for e, _ in operands)
-                    scale = max(s for _, s in operands)
+                    level = max(e for e, _, _ in operands)
+                    nominal = max(n for _, _, n in operands)
+                    scale = max(s + (nominal-n if kind == 'add' and len(operands) == 2 else 0)
+                                for _, s, n in operands)
                     if kind == 'mul':
-                        scale = sum(s for _, s in operands) + (40 if 'p' in inputs else 0)
-                        q = (scale - 40) // 30
-                        level, scale = level + q, scale - q * 30
+                        scale = sum(s for _, s, _ in operands) + (40 if 'p' in inputs else 0)
+                        nominal = sum(n for _, _, n in operands) + (40 if 'p' in inputs else 0)
+                        level, scale, nominal = normalize(level, scale, nominal)
                     if level > budget:
                         valid = False
                         break
-                    states[name] = (level, scale)
+                    states[name] = (level, scale, nominal)
                 if not valid or cost >= best:
                     break
             if valid:
@@ -204,10 +213,10 @@ def check_plan(plan, ir, graph, spec, exhausted):
                 assert nominal[ids[0]] == nominal[ids[1]], step
                 result += value[ids[1]]
         elif op == 'rescale':
-            assert nominal[ids[0]] >= 70, step
             assert level - after['level'] == 1, step
             scale -= math.log2(spec['context']['rns_moduli'][level])
-            level -= 1; ns -= 30; counts['rescale_q'] += 1
+            assert scale >= 40, step
+            level -= 1; ns = math.ceil(scale); counts['rescale_q'] += 1
             if producer.get(ids[0]) == 'rescale':
                 counts['double_rescales'] += 1
             assert step['attrs']['target_level'] == level
@@ -229,14 +238,12 @@ def check_plan(plan, ir, graph, spec, exhausted):
         assert after['level'] == level, step
         assert math.isclose(after['scale_log2'], scale, abs_tol=1e-8), step
         assert nominal[out] == ns, (step, ns, nominal[out])
-        # ModSwitch may be hoisted between normalization steps. Arithmetic
-        # must still wait until the threshold normalization is complete.
-        for v in ids:
-            if desc[v]['kind'] == 'ciphertext' and nominal[v] >= 70:
-                assert op in ('rescale', 'relinearize', 'mod_switch'), step
+        if after['kind'] == 'ciphertext':
+            capacity = sum(math.log2(q) for q in spec['context']['rns_moduli'][:level+1])
+            assert 40 <= scale < capacity, (step, scale, capacity)
         value[out] = result; producer[out] = op
     for v, expected in zip(plan['final_outputs'], graph.expected()):
-        assert 40 <= nominal[v] < 70
+        assert desc[v]['scale_log2'] >= 40
         assert math.isclose(value[v], expected, abs_tol=1e-12, rel_tol=1e-12)
     return counts
 
@@ -268,7 +275,8 @@ def main():
             for name, graph, exhausted in cases():
                 exhausted = (budget if exhausted is True else
                              max(0, budget-2) if exhausted == 'two-left' else 0)
-                minimum = graph.minimum_boots(budget, boot_scale, exhausted)
+                minimum = graph.minimum_boots(budget, boot_scale, exhausted,
+                                              spec['context']['rns_moduli'])
                 for strategy in args.strategies:
                     out = root / f'{boot_scale}-q{budget}-{strategy}-{name}'; out.mkdir(exist_ok=True)
                     (out/'input.mlir').write_text(graph.source(exhausted))

@@ -216,8 +216,9 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
 
 LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec &spec) {
   llvm::DenseMap<Value, double> scales;
-  for (Value arg : func.getArguments())
-    scales[arg] = ckks::getPolyType(arg).getScaleLog2();
+  auto arguments = func->getAttrOfType<DenseF64ArrayAttr>("earth.arg_scales");
+  for (auto [i, arg] : llvm::enumerate(func.getArguments()))
+    scales[arg] = arguments ? arguments.asArrayRef()[i] : ckks::getPolyType(arg).getScaleLog2();
   OpBuilder builder(func.getContext());
   auto annotate = [&](Operation *op, double scale) {
     op->setAttr("runtime.scale_log2", builder.getF64FloatAttr(scale));
@@ -244,6 +245,9 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
       auto target = ckks::getPolyType(rescale.getResult());
       for (unsigned level = source.getLevel(); level > target.getLevel(); --level)
         scale -= std::log2(static_cast<double>(spec.moduli.at(level)));
+      if (auto floor = func->getAttrOfType<FloatAttr>("earth.scale_waterline");
+          floor && scale < floor.getValueAsDouble())
+        return op->emitError("native Rescale violates the planned scale waterline");
     } else if (auto add = dyn_cast<ckks::AddCPOp>(op)) {
       auto encode = add.getRhs().getDefiningOp<ckks::EncodeOp>();
       if (!encode) return op->emitError("AddCP requires a local encoding for actual-scale alignment");
@@ -300,9 +304,25 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
     }
     if (!std::isfinite(scale) || scale < 0 || scale > 1023)
       return op->emitError("actual CKKS scale is outside the supported range");
+    if (func->hasAttr("earth.native_scale_moduli") &&
+        ckks::getPolyType(op->getResult(0)).getComponents() > 1) {
+      double capacity = 0;
+      for (unsigned i = 0; i <= ckks::getPolyType(op->getResult(0)).getLevel(); ++i)
+        capacity += std::log2(static_cast<double>(spec.moduli[i]));
+      if (scale >= capacity)
+        return op->emitError("actual CKKS scale exceeds the remaining modulus capacity");
+    }
     annotate(op, scale);
   }
   func->setAttr("ckks.rns_moduli", builder.getDenseI64ArrayAttr(spec.moduli));
+  if (auto planned = func->getAttrOfType<DenseF64ArrayAttr>("earth.result_scales")) {
+    auto outputs = func.front().getTerminator()->getOperands();
+    if (planned.size() != outputs.size())
+      return func.emitError("native planned result scale count disagrees with function results");
+    for (auto [i, output] : llvm::enumerate(outputs))
+      if (std::abs(scales.lookup(output) - planned.asArrayRef()[i]) > 1e-8)
+        return func.emitError("native planned result scale disagrees with physical replay");
+  }
   return success();
 }
 
@@ -390,6 +410,26 @@ struct MaterializePhysicalLevelsPass
       signalPassFailure();
       return;
     }
+    const auto plannedModuli = func->getAttrOfType<DenseI64ArrayAttr>("earth.native_scale_moduli");
+    if (plannedModuli) {
+      auto anchor = func->getAttrOfType<IntegerAttr>("earth.native_output_level");
+      if (!spec->nativeRescale || plannedModuli.asArrayRef() != ArrayRef<int64_t>(spec->moduli)) {
+        func.emitError("native scale-planning chain disagrees with physical-level OperatorSpec");
+        return signalPassFailure();
+      }
+      if (!anchor || anchor.getInt() != static_cast<int64_t>(spec->upperBound)) {
+        func.emitError("native scale-planning Boot anchor disagrees with physical-level OperatorSpec");
+        return signalPassFailure();
+      }
+      // Mixed-width admission is a separate change. This step updates scale
+      // planning and its verification for the existing equal-width native path.
+      if (!llvm::all_of(spec->modulusBits, [&](uint64_t bits) {
+            return bits == spec->modulusBits.front();
+          })) {
+        func.emitError("native physical-level validation still requires equal-width Q");
+        return signalPassFailure();
+      }
+    }
 
     SmallVector<std::pair<Value, Type>> mappedValues;
     for (Block &block : func.getBody()) {
@@ -469,8 +509,8 @@ struct MaterializePhysicalLevelsPass
         // nominal bits leave room for a large enough rounding factor; the
         // backend must still check actual primes and the resulting error.
         constexpr uint64_t integerAlignmentBits = 30;
-        if (spec->nativeRescale ? modulusDrop != scaleDrop :
-            (modulusDrop < scaleDrop || modulusDrop - scaleDrop < integerAlignmentBits)) {
+        if (!plannedModuli && (spec->nativeRescale ? modulusDrop != scaleDrop :
+            (modulusDrop < scaleDrop || modulusDrop - scaleDrop < integerAlignmentBits))) {
           op->emitError("physical Rescale requires at least 30 extra nominal "
                         "modulus bits for integer scale alignment");
           return WalkResult::interrupt();
@@ -478,7 +518,7 @@ struct MaterializePhysicalLevelsPass
         uint64_t remainingModulusBits = 0;
         for (uint64_t level = 0; level <= *resultLevel; ++level)
           remainingModulusBits += spec->modulusBits[level];
-        if (static_cast<uint64_t>(resultType.getScaleLog2()) >=
+        if (!plannedModuli && static_cast<uint64_t>(resultType.getScaleLog2()) >=
             remainingModulusBits) {
           op->emitError("physical Rescale target scale must be below the "
                         "remaining nominal modulus bits");

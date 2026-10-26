@@ -2,16 +2,47 @@
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Support/Support.h"
 #include "mlir/IR/Value.h"
+#include <cmath>
 
 using namespace mlir;
 
 int64_t hecate::earth::bootstrapQBudget() {
+  if (usesNativeScalePlanning())
+    return EarthDialect::nativeOutputLevel - EarthDialect::nativeLowerLevel;
   return EarthDialect::bootstrapLevelUpperBound -
          EarthDialect::bootstrapLevelLowerBound;
 }
 
+bool hecate::earth::usesNativeScalePlanning() {
+  return !EarthDialect::nativeModuli.empty();
+}
+
+hecate::earth::ScaleState hecate::earth::normalizeScaleState(
+    ScaleState state, double waterline) {
+  if (!usesNativeScalePlanning()) {
+    while (state.scale >= waterline + EarthDialect::rescalingFactor) {
+      state.scale -= EarthDialect::rescalingFactor;
+      ++state.level;
+    }
+    return state;
+  }
+  while (EarthDialect::nativeOutputLevel - state.level >= 0) {
+    auto index = EarthDialect::nativeOutputLevel - state.level;
+    double next = state.scale - std::log2(static_cast<double>(EarthDialect::nativeModuli[index]));
+    if (next < waterline) break;
+    state.scale = next;
+    ++state.level;
+  }
+  return state;
+}
+
+void hecate::earth::clearActualScales(func::FuncOp func) {
+  func.walk([](Operation *op) { op->removeAttr("earth.actual_scale"); });
+}
+
 void hecate::earth::prepareThresholdOperands(ForwardMgmtInterface op,
                                              int64_t waterline) {
+  op->removeAttr("earth.actual_scale");
   OpBuilder builder(op);
   for (auto &operand : op->getOpOperands())
     if (auto constant = operand.get().getDefiningOp<ConstantOp>();
@@ -23,8 +54,13 @@ void hecate::earth::prepareThresholdOperands(ForwardMgmtInterface op,
 Value hecate::earth::normalizeScale(Value value, OpBuilder &builder,
                                     int64_t waterline, bool replaceUses) {
   IRRewriter rewriter(builder);
-  while (getScaleType(value).getScale() >=
-         waterline + EarthDialect::rescalingFactor) {
+  auto state = normalizeScaleState(
+      {static_cast<int64_t>(getScaleType(value).getLevel()), actualScale(value)}, waterline);
+  // A trial can cross the working budget so coverage analysis can identify
+  // its first infeasible boundary, but cannot consume the terminal q0.
+  if (usesNativeScalePlanning() && state.level > EarthDialect::nativeOutputLevel)
+    return {};
+  while (getScaleType(value).getLevel() < state.level) {
     auto next = builder.create<RescaleOp>(value.getLoc(), value);
     if (replaceUses)
       rewriter.replaceAllUsesExcept(value, next, next);
@@ -56,6 +92,7 @@ FailureOr<Value> hecate::earth::applyThresholdScale(ForwardMgmtInterface op,
     prepareThresholdOperands(op, waterline);
   }
   SmallVector<Type> types;
+  op->removeAttr("earth.actual_scale");
   auto inference = cast<InferTypeOpInterface>(op.getOperation());
   if (failed(inference.inferReturnTypes(
           op->getContext(), op->getLoc(), op->getOperands(),
@@ -67,16 +104,25 @@ FailureOr<Value> hecate::earth::applyThresholdScale(ForwardMgmtInterface op,
   Value result = op->getResult(0);
   if (isa<MulOp, BootstrapOp>(op.getOperation()))
     result = normalizeScale(result, builder, waterline, true);
+  if (!result) return failure();
   return result;
 }
 
 void hecate::earth::finishThresholdScale(func::FuncOp func, OpBuilder &builder,
                                          TypeRange inputTypes) {
   auto result = cast<func::ReturnOp>(func.front().getTerminator());
+  if (usesNativeScalePlanning()) {
+    clearActualScales(func);
+    SmallVector<double> scales;
+    for (Value value : result.getOperands()) scales.push_back(actualScale(value));
+    func->setAttr("earth.result_scales", builder.getDenseF64ArrayAttr(scales));
+    func->setAttr("earth.native_scale_moduli", builder.getDenseI64ArrayAttr(EarthDialect::nativeModuli));
+    func->setAttr("earth.native_output_level", builder.getI64IntegerAttr(EarthDialect::nativeOutputLevel));
+  }
   func.setFunctionType(
       builder.getFunctionType(inputTypes, result.getOperandTypes()));
   func->setAttr("init_level", builder.getI64IntegerAttr(
-                                  EarthDialect::bootstrapLevelUpperBound));
+      usesNativeScalePlanning() ? bootstrapQBudget() + 1 : EarthDialect::bootstrapLevelUpperBound));
   SmallVector<int64_t> inputScales, outputScales;
   for (Value arg : func.getArguments())
     inputScales.push_back(getScaleType(arg).getScale());
@@ -188,8 +234,14 @@ void hecate::earth::refineInputValues(mlir::func::FuncOp func,
                                       mlir::OpBuilder builder,
                                       SmallVector<mlir::Type, 4> &inputTypes,
                                       int64_t waterline, int64_t output_val) {
+  if (usesNativeScalePlanning()) clearActualScales(func);
+  if (usesNativeScalePlanning())
+    func->setAttr("earth.scale_waterline", builder.getF64FloatAttr(waterline));
   // Set function argument types
   if (!func->hasAttr("segment_inputType")) {
+    if (usesNativeScalePlanning())
+      func->setAttr("earth.arg_scales", builder.getDenseF64ArrayAttr(
+          SmallVector<double>(func.getNumArguments(), static_cast<double>(waterline))));
     for (auto argval : func.getArguments()) {
       auto tt = argval.getType().dyn_cast<RankedTensorType>();
       argval.setType(RankedTensorType::get(
@@ -199,6 +251,8 @@ void hecate::earth::refineInputValues(mlir::func::FuncOp func,
       inputTypes.push_back(argval.getType());
     }
   } else {
+    if (usesNativeScalePlanning())
+      func->setAttr("earth.arg_scales", func->getAttr("segment_input_scales"));
     auto &&inputType_attrs = func->getAttr("segment_inputType")
                                  .dyn_cast<mlir::ArrayAttr>()
                                  .getValue();

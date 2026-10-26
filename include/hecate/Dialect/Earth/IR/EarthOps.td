@@ -21,6 +21,11 @@ def Earth_Dialect : Dialect {
   let extraClassDeclaration = [{
 
     static void setCKKSParameters(llvm::StringRef filename);
+    static void setNativeScaleParameters(llvm::StringRef specPath,
+                                         llvm::StringRef bootProfile);
+    static std::vector<int64_t> nativeModuli;
+    static int64_t nativeOutputLevel;
+    static int64_t nativeLowerLevel;
     static std::map<std::string, llvm::SmallVector<int64_t>> getLatencyTable();
     static std::map<std::string, llvm::SmallVector<double>> getNoiseTable();
     static int64_t polynomialDegree;

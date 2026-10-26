@@ -36,10 +36,11 @@ struct GreedyBootstrapPlacementPass
     auto func = getOperation();
     const int64_t factor = EarthDialect::rescalingFactor;
     const int64_t bootScale = bootstrap_scale ? bootstrap_scale.getValue() : factor;
-    const int64_t bootNormalizationLevels =
-        factor > 0 && bootScale >= waterline ? (bootScale - waterline) / factor : 0;
-    const int64_t lastBootLevel = EarthDialect::bootstrapLevelUpperBound -
-                                  EarthDialect::bootstrapLevelLowerBound;
+    const auto bootState = factor > 0 && bootScale >= waterline
+        ? normalizeScaleState({0, static_cast<double>(bootScale)}, waterline)
+        : ScaleState{0, static_cast<double>(bootScale)};
+    const int64_t bootNormalizationLevels = bootState.level;
+    const int64_t lastBootLevel = bootstrapQBudget();
     if (func.isExternal())
       return;
     if (!llvm::hasSingleElement(func.getBody()) || waterline <= 0 ||
@@ -148,7 +149,7 @@ struct GreedyBootstrapPlacementPass
       llvm::stable_sort(operations, [&](Operation *a, Operation *b) {
         return depths.lookup(a) < depths.lookup(b);
       });
-      struct State { int64_t level, scale; };
+      struct State { int64_t level; double scale; int64_t nominal; };
       SmallVector<uint64_t> cost(maxDepth + 1,
                                  std::numeric_limits<uint64_t>::max());
       SmallVector<int64_t> previous(maxDepth + 1, -1);
@@ -167,10 +168,12 @@ struct GreedyBootstrapPlacementPass
           if (it != states.end()) return it->second;
           if (start == 0) {
             auto type = getScaleType(value);
-            return {static_cast<int64_t>(type.getLevel()), static_cast<int64_t>(type.getScale())};
+            return {static_cast<int64_t>(type.getLevel()), actualScale(value),
+                    static_cast<int64_t>(type.getScale())};
           }
-          return {bootNormalizationLevels,
-                  bootScale - bootNormalizationLevels * factor};
+          return {bootNormalizationLevels, bootState.scale,
+                  usesNativeScalePlanning() ? static_cast<int64_t>(std::ceil(bootState.scale))
+                                            : bootScale - bootNormalizationLevels * factor};
         };
         bool valid = true;
         size_t next = 0;
@@ -180,23 +183,34 @@ struct GreedyBootstrapPlacementPass
           while (next < operations.size() && depths.lookup(operations[next]) <= end) {
             auto *op = operations[next++];
             if (isa<ConstantOp, func::ReturnOp>(op)) continue;
-            State result{0, 0};
+            State result{0, 0, 0};
             bool first = true;
+            SmallVector<State> operands;
             for (Value input : op->getOperands()) {
               if (!getScaleType(input).isCipher()) continue;
               State operand = stateOf(input);
+              operands.push_back(operand);
               result.level = std::max(result.level, operand.level);
-              if (isa<MulOp>(op)) result.scale += operand.scale;
-              else result.scale = std::max(result.scale, operand.scale);
+              if (isa<MulOp>(op)) {
+                result.scale += operand.scale;
+                result.nominal += operand.nominal;
+              } else result.nominal = std::max(result.nominal, operand.nominal);
               first = false;
             }
             if (first) { valid = false; break; }
+            if (!isa<MulOp>(op))
+              for (auto operand : operands)
+                result.scale = std::max(result.scale, operand.scale +
+                    (isa<AddOp>(op) && operands.size() == 2 ? result.nominal - operand.nominal : 0));
             if (auto mul = dyn_cast<MulOp>(op)) {
-              if (mul.isSingle()) result.scale += waterline;
-              while (result.scale >= waterline + factor) {
-                result.scale -= factor;
-                ++result.level;
-              }
+              if (mul.isSingle()) { result.scale += waterline; result.nominal += waterline; }
+              auto normalized = normalizeScaleState({result.level, result.scale}, waterline);
+              if (usesNativeScalePlanning()) {
+                if (normalized.level != result.level)
+                  result.nominal = static_cast<int64_t>(std::ceil(normalized.scale));
+              } else result.nominal -= (normalized.level - result.level) * factor;
+              result.level = normalized.level;
+              result.scale = normalized.scale;
             }
             if (result.level > lastBootLevel) { valid = false; break; }
             for (Value output : op->getResults()) states[output] = result;
@@ -266,15 +280,16 @@ struct GreedyBootstrapPlacementPass
       }
       if (isa<MulOp>(op)) {
         auto requiredLevel = [&]() {
-          int64_t level = 0, scale = 0;
+          int64_t level = 0;
+          double scale = 0;
           for (Value logical : logicalOperands) {
             auto type = getScaleType(resolve(logical));
             if (type.isCipher()) {
               level = std::max(level, static_cast<int64_t>(type.getLevel()));
-              scale += type.getScale();
+              scale += actualScale(resolve(logical));
             } else scale += waterline;
           }
-          return level + std::max<int64_t>(0, (scale - waterline) / factor);
+          return normalizeScaleState({level, scale}, waterline).level;
         };
         if (requiredLevel() > lastBootLevel) {
           if (depth_dp) {
@@ -312,6 +327,10 @@ struct GreedyBootstrapPlacementPass
         if (isa<MulOp>(op)) {
           builder.setInsertionPointAfter(op);
           current[op->getResult(0)] = normalize(op->getResult(0));
+          if (!current[op->getResult(0)]) {
+            op->emitError("multiplication exceeds the actual-prime Q budget");
+            return signalPassFailure();
+          }
         }
       }
       for (auto logical : logicalOperands) {

@@ -807,6 +807,9 @@ private:
     auto cached = actualScales.find(value);
     if (cached != actualScales.end()) return cached->second;
     double scale = type.getScaleLog2();
+    if (auto argument = dyn_cast<BlockArgument>(value))
+      if (auto scales = func->getAttrOfType<DenseF64ArrayAttr>("earth.arg_scales"))
+        scale = scales.asArrayRef()[argument.getArgNumber()];
     if (Operation *op = value.getDefiningOp()) {
       if (isa<ckks::EncodeOp, dist::PreparePlainOp>(op)) {
         auto attr = op->getAttrOfType<FloatAttr>("runtime.scale_log2");

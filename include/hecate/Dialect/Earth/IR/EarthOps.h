@@ -16,6 +16,7 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include <cmath>
+#include <vector>
 
 #include "hecate/Support/Support.h"
 
@@ -32,6 +33,7 @@ namespace hecate {
 namespace earth {
 ::hecate::earth::HEScaleTypeInterface getScaleType(mlir::Value v);
 ::mlir::RankedTensorType getTensorType(mlir::Value v);
+double actualScale(mlir::Value value);
 } // namespace earth
 } // namespace hecate
 #endif

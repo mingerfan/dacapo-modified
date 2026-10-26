@@ -24,6 +24,14 @@ void inferTypeForward(hecate::earth::ForwardMgmtInterface sop);
 // Logical levels count consumed Q. Each threshold Rescale consumes one Q;
 // Boot starts a new chain with its explicitly selected output scale.
 int64_t bootstrapQBudget();
+bool usesNativeScalePlanning();
+struct ScaleState {
+  int64_t level; // Q consumed since the selected Boot output anchor.
+  double scale;  // Actual log2(scale), independent of the integer IR type.
+};
+double actualScale(mlir::Value value);
+ScaleState normalizeScaleState(ScaleState state, double waterline);
+void clearActualScales(mlir::func::FuncOp func);
 void prepareThresholdOperands(ForwardMgmtInterface op, int64_t waterline);
 mlir::Value normalizeScale(mlir::Value value, mlir::OpBuilder &builder,
                            int64_t waterline, bool replaceUses = false);

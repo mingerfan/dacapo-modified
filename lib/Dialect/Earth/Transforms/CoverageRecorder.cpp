@@ -58,6 +58,10 @@ struct CoverageRecorderPass
                             .dyn_cast<hecate::earth::HEScaleTypeInterface>();
       argval.setType(input_type);
     }
+    if (hecate::earth::usesNativeScalePlanning()) {
+      hecate::earth::clearActualScales(dup);
+      dup->setAttr("earth.arg_scales", dup->getAttr("segment_input_scales"));
+    }
 
     // Analyze normalized results, not the pre-Rescale multiply scale.
     int64_t coverage = -1, bootCoverage = -1;
@@ -70,7 +74,8 @@ struct CoverageRecorderPass
                         : hecate::earth::EarthDialect::rescalingFactor;
     for (auto sop : original) {
       auto opid = hecate::getIntegerAttr("opid", sop->getResult(0));
-      if (!isa<hecate::earth::BootstrapOp>(sop) && opid < from)
+      if (!isa<hecate::earth::BootstrapOp>(sop) &&
+          (opid < from || (hecate::earth::usesNativeScalePlanning() && from && opid == from)))
         continue;
       auto result =
           hecate::earth::applyThresholdScale(sop, waterline, bootScale);

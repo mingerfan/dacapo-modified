@@ -30,6 +30,7 @@ struct DaCapoPlannerPass
       double cost = 0;
       SmallVector<int64_t> cuts;
       SmallVector<Type, 4> types;
+      SmallVector<double, 4> scales;
     };
     // Bypassed ciphertexts retain scale and consumed Q. Different frontier
     // states must survive the DP even when a cheaper state exists at that cut.
@@ -38,7 +39,8 @@ struct DaCapoPlannerPass
     for (auto argument : func.getArguments())
       inputs.push_back(
           hecate::earth::getScaleType(argument).switchScale(waterline));
-    plans[0].push_back({0, {}, inputs});
+    SmallVector<double, 4> inputScales(inputs.size(), static_cast<double>(waterline));
+    plans[0].push_back({0, {}, inputs, inputScales});
     OwningOpRef<ModuleOp> module = ModuleOp::create(func.getLoc());
     PassManager pm(func.getContext()), coverage(func.getContext());
     pm.addNestedPass<func::FuncOp>(
@@ -70,6 +72,8 @@ struct DaCapoPlannerPass
                         from ? ca.getValueInfo(from)->getLiveOuts()
                              : SmallVector<int64_t, 4>{}));
       copy->setAttr("segment_inputType", builder.getTypeArrayAttr(state.types));
+      if (hecate::earth::usesNativeScalePlanning())
+        copy->setAttr("segment_input_scales", builder.getDenseF64ArrayAttr(state.scales));
       copy->setAttr("segment_return", builder.getDenseI64ArrayAttr(
                                           ca.getValueInfo(to)->getLiveOuts()));
       module->push_back(copy);
@@ -102,9 +106,13 @@ struct DaCapoPlannerPass
                 candidate.types = inputs;
                 candidate.types.append(copy.getResultTypes().begin(),
                                        copy.getResultTypes().end());
+                candidate.scales = inputScales;
+                if (hecate::earth::usesNativeScalePlanning())
+                  for (Value value : copy.front().getTerminator()->getOperands())
+                    candidate.scales.push_back(hecate::earth::actualScale(value));
                 auto &states = plans[to];
                 auto same = llvm::find_if(states, [&](const Plan &other) {
-                  return other.types == candidate.types;
+                  return other.types == candidate.types && other.scales == candidate.scales;
                 });
                 if (same == states.end())
                   states.push_back(std::move(candidate));
