@@ -135,6 +135,15 @@ void hecate::earth::EarthDialect::setNativeScaleParameters(
       if (nativeOutputLevel >= 0)
         fail("duplicate Boot profile");
       nativeOutputLevel = profile.at("output_level").get<int64_t>();
+      if (profile.contains("input_scale_log2")) {
+        if (!profile.at("input_scale_log2").is_number_integer() ||
+            profile.at("input_scale_log2").get<int64_t>() <= 0)
+          fail("Boot input scale must be a positive integer");
+        // Reserve two Q for an encoded-one alignment with >=30 bits of
+        // plaintext precision. Physical replay uses only the Q it needs.
+        nativeLowerLevel = std::max(nativeLowerLevel,
+            profile.at("input_level_min").get<int64_t>() + 2);
+      }
     }
   if (nativeOutputLevel < 0) fail("Boot profile is missing or invalid");
   if (nativeLowerLevel < 0 || nativeOutputLevel < nativeLowerLevel ||

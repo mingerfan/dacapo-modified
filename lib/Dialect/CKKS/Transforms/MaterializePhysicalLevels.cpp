@@ -38,6 +38,8 @@ struct PhysicalLevelSpec {
   std::vector<int64_t> moduli;
   bool nativeRescale = false;
   std::optional<int64_t> bootOutputScale;
+  std::optional<int64_t> bootInputScale;
+  uint64_t bootInputLevel = 0;
 };
 
 FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
@@ -150,6 +152,26 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
       func.emitError("Boot output scale must be positive");
       return failure();
     }
+    if (selected->contains("input_scale_log2")) {
+      if (!(*selected)["input_scale_log2"].is_number_integer() ||
+          (*selected)["input_scale_log2"].get<int64_t>() <= 0 ||
+          !selected->contains("input_level_min") ||
+          !(*selected)["input_level_min"].is_number_integer() ||
+          !selected->contains("input_level_max") ||
+          !(*selected)["input_level_max"].is_number_integer()) {
+        func.emitError("native Boot input level/scale contract is invalid");
+        return failure();
+      }
+      auto inputLevel = (*selected)["input_level_min"].get<int64_t>();
+      auto inputMax = (*selected)["input_level_max"].get<int64_t>();
+      if (!result.nativeRescale || inputLevel < signedLower ||
+          inputMax < inputLevel || inputMax > signedUpper || inputLevel + 2 > anchor) {
+        func.emitError("native Boot input alignment requires two Q above its input level");
+        return failure();
+      }
+      result.bootInputScale = (*selected)["input_scale_log2"].get<int64_t>();
+      result.bootInputLevel = static_cast<uint64_t>(inputLevel);
+    }
   }
   result.modulusBits.reserve(moduli->size());
   for (const Json &bits : *moduli) {
@@ -237,6 +259,71 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
       continue;
     }
     if (auto boot = dyn_cast<ckks::BootstrapCOp>(op)) {
+      if (spec.bootInputScale) {
+        Value input = boot->getOperand(0);
+        auto inputType = cast<RankedTensorType>(input.getType());
+        auto poly = cast<ckks::PolyTypeInterface>(inputType.getElementType());
+        const auto targetLevel = spec.bootInputLevel;
+        const double targetScale = *spec.bootInputScale;
+        double scale = scales.lookup(input);
+        if (poly.getLevel() < targetLevel)
+          return op->emitError("native Boot input is below the required level");
+        unsigned drops = 0;
+        double plainScale = targetScale - scale;
+        if (std::abs(scale - targetScale) > 1e-8) {
+          // Prefer one Q, but keep enough encoding precision for the unit.
+          do {
+            ++drops;
+            if (targetLevel + drops > poly.getLevel())
+              return op->emitError("native Boot scale alignment has insufficient Q/encoding precision");
+            plainScale += std::log2(static_cast<double>(spec.moduli.at(targetLevel + drops)));
+          } while (plainScale < 30);
+        }
+        builder.setInsertionPoint(op);
+        auto typeAt = [&](unsigned level, double actual, unsigned components) {
+          auto element = poly.switchLevel(level)
+              .switchScaleLog2(static_cast<int64_t>(std::ceil(actual)))
+              .switchComponents(components);
+          return RankedTensorType::get(inputType.getShape(), element);
+        };
+        if (poly.getLevel() > targetLevel + drops) {
+          auto mod = builder.create<ckks::ModswitchCOp>(op->getLoc(),
+              typeAt(targetLevel + drops, scale, poly.getComponents()), input,
+              poly.getLevel() - targetLevel - drops);
+          annotate(mod, scale);
+          input = mod.getResult();
+        }
+        if (drops) {
+          double capacity = 0;
+          for (unsigned i = 0; i <= targetLevel + drops; ++i)
+            capacity += std::log2(static_cast<double>(spec.moduli.at(i)));
+          if (!std::isfinite(plainScale) || scale + plainScale >= capacity)
+            return op->emitError("native Boot alignment exceeds the modulus capacity");
+          auto payloadType = RankedTensorType::get(
+              {hecate::earth::EarthDialect::polynomialDegree / 2}, builder.getF64Type());
+          auto one = DenseElementsAttr::get(payloadType, builder.getF64FloatAttr(1.0));
+          auto encoded = builder.create<ckks::EncodeOp>(op->getLoc(),
+              typeAt(targetLevel + drops, plainScale, 1), one);
+          annotate(encoded, plainScale);
+          scale += plainScale;
+          auto multiplied = builder.create<ckks::MulCPOp>(op->getLoc(),
+              typeAt(targetLevel + drops,
+                  ckks::getPolyType(input).getScaleLog2() + ckks::getPolyType(encoded.getResult()).getScaleLog2(),
+                  poly.getComponents()), input, encoded);
+          annotate(multiplied, scale);
+          input = multiplied.getResult();
+          for (unsigned remaining = drops; remaining > 0; --remaining) {
+            scale -= std::log2(static_cast<double>(spec.moduli.at(targetLevel + remaining)));
+            auto rescale = builder.create<ckks::RescaleCOp>(op->getLoc(),
+                typeAt(targetLevel + remaining - 1, scale, poly.getComponents()), input);
+            annotate(rescale, scale);
+            input = rescale.getResult();
+          }
+        }
+        if (std::abs(scale - targetScale) > 1e-8)
+          return op->emitError("native Boot input scale alignment failed");
+        boot->setOperand(0, input);
+      }
       annotate(op, ckks::getPolyType(boot.getResult()).getScaleLog2());
       continue;
     }
