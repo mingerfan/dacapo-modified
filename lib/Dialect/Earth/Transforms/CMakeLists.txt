@@ -6,6 +6,7 @@ add_mlir_dialect_library(EarthTransforms
  GreedyBootstrapPlacement.cpp
  CodeSegmentation.cpp
  Common.cpp
+ TargetScalePlanning.cpp
  OptimizePolynomialArithmetic.cpp
  UpscaleBubbling.cpp
  EarlyModswitch.cpp

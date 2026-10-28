@@ -25,8 +25,11 @@ def Earth_Dialect : Dialect {
                                          llvm::StringRef bootProfile);
     static std::vector<int64_t> nativeModuli;
     static int64_t nativeOutputLevel;
+    static int64_t nativeLevelAnchor;
     static int64_t nativeLowerLevel;
-    static std::map<std::string, llvm::SmallVector<int64_t>> getLatencyTable();
+    static int64_t nativeBootInputLevel;
+    static double nativeBootInputScale;
+    static const std::map<std::string, llvm::SmallVector<int64_t>> &getLatencyTable();
     static std::map<std::string, llvm::SmallVector<double>> getNoiseTable();
     static int64_t polynomialDegree;
     static int64_t rescalingFactor;
@@ -94,7 +97,7 @@ Op<Earth_Dialect, mnemonic, !listconcat(traits, [Pure, DeclareOpInterfaceMethods
 
     // - HEProfInterface Non-default methods
     unsigned $cppClass::getLatencyOf(unsigned level) {
-      return ::hecate::earth::EarthDialect::getLatencyTable()[getOperationName().str()+ (isSingle()? "_single" : "_double")][level];
+      return ::hecate::earth::EarthDialect::getLatencyTable().at(getOperationName().str()+ (isSingle()? "_single" : "_double"))[level];
     }
     unsigned $cppClass::getNoiseScale() {
       return getScale();
@@ -291,7 +294,7 @@ def ModswitchOp : Unary_Earth_Op<"modswitch"> {
       unsigned lat = 0;
       int operandLevel = getType().dyn_cast<HEScaleTypeInterface>().getLevel();
       for ( int i = 0 ; i < getDownFactor(); i++ ){
-        lat += ::hecate::earth::EarthDialect::getLatencyTable()[getOperationName().str()+ (isSingle()? "_single" : "_double")][operandLevel - i];
+        lat += ::hecate::earth::EarthDialect::getLatencyTable().at(getOperationName().str()+ (isSingle()? "_single" : "_double"))[operandLevel - i];
       }
       return lat;
     }

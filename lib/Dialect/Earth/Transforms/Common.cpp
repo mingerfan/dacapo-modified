@@ -1,6 +1,7 @@
 #include "hecate/Dialect/Earth/Transforms/Common.h"
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Support/Support.h"
+#include "hecate/Support/BootstrapInputAlignment.h"
 #include "mlir/IR/Value.h"
 #include <cmath>
 
@@ -8,13 +9,32 @@ using namespace mlir;
 
 int64_t hecate::earth::bootstrapQBudget() {
   if (usesNativeScalePlanning())
-    return EarthDialect::nativeOutputLevel - EarthDialect::nativeLowerLevel;
+    return EarthDialect::nativeLevelAnchor - EarthDialect::nativeLowerLevel;
   return EarthDialect::bootstrapLevelUpperBound -
          EarthDialect::bootstrapLevelLowerBound;
 }
 
+int64_t hecate::earth::bootstrapOutputLevel() {
+  return usesNativeScalePlanning()
+             ? EarthDialect::nativeLevelAnchor - EarthDialect::nativeOutputLevel
+             : 0;
+}
+
 bool hecate::earth::usesNativeScalePlanning() {
   return !EarthDialect::nativeModuli.empty();
+}
+
+bool hecate::earth::canBootstrap(ScaleState state) {
+  if (state.level < 0 || state.level > bootstrapQBudget())
+    return false;
+  if (!usesNativeScalePlanning() || EarthDialect::nativeBootInputScale == 0)
+    return true;
+  auto alignment = hecate::planBootstrapInputAlignment(
+      EarthDialect::nativeModuli, EarthDialect::nativeLevelAnchor - state.level,
+      state.scale, EarthDialect::nativeBootInputLevel,
+      EarthDialect::nativeBootInputScale);
+  return alignment && (!alignment->drops ||
+                       state.scale + alignment->plaintextScale < alignment->capacity);
 }
 
 hecate::earth::ScaleState hecate::earth::normalizeScaleState(
@@ -26,8 +46,8 @@ hecate::earth::ScaleState hecate::earth::normalizeScaleState(
     }
     return state;
   }
-  while (EarthDialect::nativeOutputLevel - state.level >= 0) {
-    auto index = EarthDialect::nativeOutputLevel - state.level;
+  while (EarthDialect::nativeLevelAnchor - state.level >= 0) {
+    auto index = EarthDialect::nativeLevelAnchor - state.level;
     double next = state.scale - std::log2(static_cast<double>(EarthDialect::nativeModuli[index]));
     if (next < waterline) break;
     state.scale = next;
@@ -58,7 +78,7 @@ Value hecate::earth::normalizeScale(Value value, OpBuilder &builder,
       {static_cast<int64_t>(getScaleType(value).getLevel()), actualScale(value)}, waterline);
   // A trial can cross the working budget so coverage analysis can identify
   // its first infeasible boundary, but cannot consume the terminal q0.
-  if (usesNativeScalePlanning() && state.level > EarthDialect::nativeOutputLevel)
+  if (usesNativeScalePlanning() && state.level > EarthDialect::nativeLevelAnchor)
     return {};
   while (getScaleType(value).getLevel() < state.level) {
     auto next = builder.create<RescaleOp>(value.getLoc(), value);
@@ -71,11 +91,18 @@ Value hecate::earth::normalizeScale(Value value, OpBuilder &builder,
 
 FailureOr<Value> hecate::earth::applyThresholdScale(ForwardMgmtInterface op,
                                                     int64_t waterline,
-                                                    int64_t bootstrapScale) {
+                                                    int64_t bootstrapScale,
+                                                    bool checkBootInput) {
   if (waterline <= 0 || EarthDialect::rescalingFactor <= 0)
     return failure();
   OpBuilder builder(op);
   if (auto boot = dyn_cast<BootstrapOp>(op.getOperation())) {
+    if (checkBootInput && !canBootstrap(
+            {static_cast<int64_t>(getScaleType(boot.getValue()).getLevel()),
+             actualScale(boot.getValue())})) {
+      op->emitError("Boot input has insufficient Q/encoding precision for scale alignment");
+      return failure();
+    }
     if (auto planned = boot->getAttrOfType<IntegerAttr>("planned_scale");
         planned && planned.getInt() != bootstrapScale) {
       op->emitError("Boot output scale disagrees with scale-management policy");
@@ -86,7 +113,7 @@ FailureOr<Value> hecate::earth::applyThresholdScale(ForwardMgmtInterface op,
       op->emitError("Boot output scale disagrees with scale-management policy");
       return failure();
     }
-    boot.setTargetLevel(0);
+    boot.setTargetLevel(bootstrapOutputLevel());
     boot.setTargetScale(bootstrapScale);
   } else {
     prepareThresholdOperands(op, waterline);
@@ -118,11 +145,12 @@ void hecate::earth::finishThresholdScale(func::FuncOp func, OpBuilder &builder,
     func->setAttr("earth.result_scales", builder.getDenseF64ArrayAttr(scales));
     func->setAttr("earth.native_scale_moduli", builder.getDenseI64ArrayAttr(EarthDialect::nativeModuli));
     func->setAttr("earth.native_output_level", builder.getI64IntegerAttr(EarthDialect::nativeOutputLevel));
+    func->setAttr("earth.native_level_anchor", builder.getI64IntegerAttr(EarthDialect::nativeLevelAnchor));
   }
   func.setFunctionType(
       builder.getFunctionType(inputTypes, result.getOperandTypes()));
   func->setAttr("init_level", builder.getI64IntegerAttr(
-      usesNativeScalePlanning() ? bootstrapQBudget() + 1 : EarthDialect::bootstrapLevelUpperBound));
+      usesNativeScalePlanning() ? EarthDialect::nativeLevelAnchor : EarthDialect::bootstrapLevelUpperBound));
   SmallVector<int64_t> inputScales, outputScales;
   for (Value arg : func.getArguments())
     inputScales.push_back(getScaleType(arg).getScale());

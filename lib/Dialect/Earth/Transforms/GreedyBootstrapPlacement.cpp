@@ -37,8 +37,8 @@ struct GreedyBootstrapPlacementPass
     const int64_t factor = EarthDialect::rescalingFactor;
     const int64_t bootScale = bootstrap_scale ? bootstrap_scale.getValue() : factor;
     const auto bootState = factor > 0 && bootScale >= waterline
-        ? normalizeScaleState({0, static_cast<double>(bootScale)}, waterline)
-        : ScaleState{0, static_cast<double>(bootScale)};
+        ? normalizeScaleState({bootstrapOutputLevel(), static_cast<double>(bootScale)}, waterline)
+        : ScaleState{bootstrapOutputLevel(), static_cast<double>(bootScale)};
     const int64_t bootNormalizationLevels = bootState.level;
     const int64_t lastBootLevel = bootstrapQBudget();
     if (func.isExternal())
@@ -57,6 +57,28 @@ struct GreedyBootstrapPlacementPass
     for (auto &op : llvm::make_early_inc_range(llvm::reverse(func.front())))
       if (isOpTriviallyDead(&op))
         op.erase();
+
+    if (usesTargetScalePlanning()) {
+      if (depth_dp) {
+        func.emitError("experimental target scale planning does not use the "
+                       "old depth-DP simulator");
+        return signalPassFailure();
+      }
+      OpBuilder builder(func);
+      SmallVector<Type, 4> inputTypes;
+      if (failed(prepareTargetBootSchedule(func, bootScale)))
+        return signalPassFailure();
+      refineInputValues(func, builder, inputTypes, waterline, output_val);
+      if (failed(planTargetScales(func, waterline, bootScale)))
+        return signalPassFailure();
+      finishThresholdScale(func, builder, inputTypes);
+      unsigned bootCount = 0;
+      func.walk([&](BootstrapOp) { ++bootCount; });
+      llvm::outs() << "Target scale planning: greedy Boot insertion\nNumber "
+                      "of Bootstrapping: "
+                   << bootCount << '\n';
+      return;
+    }
 
     // Keep the original use counts: the management operations inserted below
     // must not extend the lifetime of a logical value in this scan.
@@ -126,6 +148,8 @@ struct GreedyBootstrapPlacementPass
         depths[op] = latest;
       }
       SmallVector<int64_t> crossing(maxDepth + 2, 0);
+      struct Interval { Value value; int64_t start, end; };
+      SmallVector<Interval> intervals;
       auto countCrossing = [&](Value value, int64_t start) {
         if (!remainingUses.lookup(value) || !getScaleType(value).isCipher())
           return;
@@ -134,6 +158,7 @@ struct GreedyBootstrapPlacementPass
           end = std::max(end, depths.lookup(user));
         ++crossing[start];
         --crossing[end];
+        intervals.push_back({value, start, end});
       };
       for (auto arg : func.getArguments())
         countCrossing(arg, 0);
@@ -215,7 +240,12 @@ struct GreedyBootstrapPlacementPass
             if (result.level > lastBootLevel) { valid = false; break; }
             for (Value output : op->getResults()) states[output] = result;
           }
-          if (valid) {
+          const bool refreshable = end == maxDepth || llvm::all_of(intervals, [&](const Interval &interval) {
+            if (interval.start > end || interval.end <= end) return true;
+            auto state = stateOf(interval.value);
+            return canBootstrap({state.level, state.scale});
+          });
+          if (valid && refreshable) {
             uint64_t candidate = start < 0 ? crossing[0]
                                           : cost[start] + (start ? crossing[start] : 0);
             if (candidate < cost[end]) {
@@ -253,11 +283,17 @@ struct GreedyBootstrapPlacementPass
 
     uint64_t bootCount = 0, barriers = 0;
     size_t nextCut = 0;
-    auto refresh = [&](Value logical) {
+    auto refresh = [&](Value logical) -> LogicalResult {
       auto value = resolve(logical);
-      value = builder.create<BootstrapOp>(value.getLoc(), value, 0, bootScale);
+      if (!canBootstrap({static_cast<int64_t>(getScaleType(value).getLevel()),
+                         actualScale(value)}))
+        return value.getDefiningOp()
+                   ? value.getDefiningOp()->emitError("greedy Boot input has insufficient Q/encoding precision")
+                   : func.emitError("greedy input has insufficient Q/encoding precision for Boot");
+      value = builder.create<BootstrapOp>(value.getLoc(), value, bootstrapOutputLevel(), bootScale);
       current[logical] = normalize(value);
       ++bootCount;
+      return success();
     };
     for (auto *op : operations) {
       SmallVector<Value> logicalOperands(op->getOperands());
@@ -274,24 +310,35 @@ struct GreedyBootstrapPlacementPass
             op->emitError("live ciphertext exceeds the bootstrap Q budget");
             return signalPassFailure();
           }
-          refresh(logical);
+          if (failed(refresh(logical))) return signalPassFailure();
         }
         ++nextCut;
       }
-      if (isa<MulOp>(op)) {
-        auto requiredLevel = [&]() {
+      if (isa<MulOp, AddOp, NegateOp, RotateOp>(op)) {
+        auto requiredState = [&]() {
           int64_t level = 0;
           double scale = 0;
+          int64_t nominal = 0;
+          for (Value logical : logicalOperands)
+            if (getScaleType(resolve(logical)).isCipher())
+              nominal = std::max(nominal, static_cast<int64_t>(getScaleType(resolve(logical)).getScale()));
           for (Value logical : logicalOperands) {
             auto type = getScaleType(resolve(logical));
             if (type.isCipher()) {
               level = std::max(level, static_cast<int64_t>(type.getLevel()));
-              scale += actualScale(resolve(logical));
-            } else scale += waterline;
+              double actual = actualScale(resolve(logical));
+              if (isa<MulOp>(op)) scale += actual;
+              else scale = std::max(scale, actual + (isa<AddOp>(op) ? nominal - type.getScale() : 0));
+            } else if (isa<MulOp>(op)) scale += waterline;
           }
-          return normalizeScaleState({level, scale}, waterline).level;
+          return isa<MulOp>(op) ? normalizeScaleState({level, scale}, waterline)
+                               : ScaleState{level, scale};
         };
-        if (requiredLevel() > lastBootLevel) {
+        auto fitsNext = [&]() {
+          auto state = requiredState();
+          return depth_dp ? state.level <= lastBootLevel : canBootstrap(state);
+        };
+        if (!fitsNext()) {
           if (depth_dp) {
             op->emitError("multiplication exceeds the simulated bootstrap Q budget");
             return signalPassFailure();
@@ -299,10 +346,13 @@ struct GreedyBootstrapPlacementPass
           llvm::SetVector<Value> operands;
           for (Value logical : logicalOperands)
             if (getScaleType(resolve(logical)).isCipher()) operands.insert(logical);
-          for (Value logical : operands) refresh(logical);
+          for (Value logical : operands)
+            if (failed(refresh(logical))) return signalPassFailure();
           ++barriers;
-          if (requiredLevel() > lastBootLevel) {
-            op->emitError("multiplication cannot fit after Boot");
+          if (!fitsNext()) {
+            op->emitError(isa<MulOp>(op)
+                              ? "multiplication cannot fit after Boot input alignment"
+                              : "operation cannot fit after Boot input alignment");
             return signalPassFailure();
           }
         }

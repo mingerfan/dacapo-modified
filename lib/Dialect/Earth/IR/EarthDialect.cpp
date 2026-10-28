@@ -10,10 +10,18 @@
 #include "nlohmann/json.hpp"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/CommandLine.h"
 #include <fstream>
 #include <cstdlib>
 
 using namespace mlir;
+
+namespace {
+llvm::cl::opt<int64_t> nativeInputLevel(
+    "native-input-level",
+    llvm::cl::desc("Initial ciphertext level; defaults to the Boot output level"),
+    llvm::cl::init(-1));
+}
 
 #define GET_TYPEDEF_CLASSES
 #include "hecate/Dialect/Earth/IR/EarthOpsTypes.cpp.inc"
@@ -114,7 +122,10 @@ int64_t hecate::earth::EarthDialect::levelUpperBound;
 int64_t hecate::earth::EarthDialect::levelLowerBound;
 std::vector<int64_t> hecate::earth::EarthDialect::nativeModuli;
 int64_t hecate::earth::EarthDialect::nativeOutputLevel = -1;
+int64_t hecate::earth::EarthDialect::nativeLevelAnchor = -1;
 int64_t hecate::earth::EarthDialect::nativeLowerLevel = -1;
+int64_t hecate::earth::EarthDialect::nativeBootInputLevel = -1;
+double hecate::earth::EarthDialect::nativeBootInputScale = 0;
 
 void hecate::earth::EarthDialect::setNativeScaleParameters(
     llvm::StringRef specPath, llvm::StringRef bootProfile) {
@@ -123,11 +134,20 @@ void hecate::earth::EarthDialect::setNativeScaleParameters(
     std::exit(1);
   };
   nativeModuli.clear();
-  nativeOutputLevel = nativeLowerLevel = -1;
-  if (specPath.empty()) return;
+  nativeOutputLevel = nativeLowerLevel = nativeLevelAnchor = -1;
+  nativeBootInputLevel = -1;
+  nativeBootInputScale = 0;
+  if (nativeInputLevel < -1) fail("native input level must be nonnegative");
+  if (specPath.empty()) {
+    if (nativeInputLevel >= 0) fail("native input level requires an actual native Q chain");
+    return;
+  }
   std::ifstream input(specPath.str());
   auto spec = nlohmann::json::parse(input);
-  if (spec.at("rescale_mode") != "native") return;
+  if (spec.at("rescale_mode") != "native") {
+    if (nativeInputLevel >= 0) fail("native input level requires an actual native Q chain");
+    return;
+  }
   nativeModuli = spec.at("context").at("rns_moduli").get<std::vector<int64_t>>();
   nativeLowerLevel = spec.at("levels").at("lower_bound").get<int64_t>();
   for (const auto &profile : spec.at("boot_profiles"))
@@ -139,13 +159,19 @@ void hecate::earth::EarthDialect::setNativeScaleParameters(
         if (!profile.at("input_scale_log2").is_number_integer() ||
             profile.at("input_scale_log2").get<int64_t>() <= 0)
           fail("Boot input scale must be a positive integer");
-        // Reserve two Q for an encoded-one alignment with >=30 bits of
-        // plaintext precision. Physical replay uses only the Q it needs.
+        nativeBootInputLevel = profile.at("input_level_min").get<int64_t>();
+        nativeBootInputScale = profile.at("input_scale_log2").get<double>();
+        // Alignment is checked against each value's actual scale, rather
+        // than reserving two Q for every arithmetic segment.
         nativeLowerLevel = std::max(nativeLowerLevel,
-            profile.at("input_level_min").get<int64_t>() + 2);
+                                   nativeBootInputLevel);
       }
     }
   if (nativeOutputLevel < 0) fail("Boot profile is missing or invalid");
+  nativeLevelAnchor = nativeInputLevel < 0 ? nativeOutputLevel : nativeInputLevel.getValue();
+  if (nativeLevelAnchor < nativeOutputLevel ||
+      nativeLevelAnchor >= static_cast<int64_t>(nativeModuli.size()))
+    fail("native input level must cover the Boot output and fit the Q chain");
   if (nativeLowerLevel < 0 || nativeOutputLevel < nativeLowerLevel ||
       nativeOutputLevel >= static_cast<int64_t>(nativeModuli.size()))
     fail("invalid chain or Boot profile");
@@ -165,7 +191,11 @@ double hecate::earth::actualScale(Value value) {
   }
   auto *op = value.getDefiningOp();
   // Coefficients can be cloned and retyped for a particular consumer.
-  if (isa<ConstantOp>(op)) return type.getScale();
+  if (isa<ConstantOp>(op)) {
+    if (auto encoding = op->getAttrOfType<FloatAttr>("earth.encoding_scale"))
+      return encoding.getValueAsDouble();
+    return type.getScale();
+  }
   if (auto cached = op->getAttrOfType<FloatAttr>("earth.actual_scale"))
     return cached.getValueAsDouble();
   double scale;
@@ -185,9 +215,10 @@ double hecate::earth::actualScale(Value value) {
     } else if (auto rescale = dyn_cast<RescaleOp>(op)) {
       auto consumed = getScaleType(rescale.getValue()).getLevel();
       scale -= std::log2(static_cast<double>(
-          EarthDialect::nativeModuli.at(EarthDialect::nativeOutputLevel - consumed)));
+          EarthDialect::nativeModuli.at(EarthDialect::nativeLevelAnchor - consumed)));
     } else if (auto upscale = dyn_cast<UpscaleOp>(op)) {
-      scale += upscale.getUpFactor();
+      auto delta = op->getAttrOfType<FloatAttr>("earth.scale_delta");
+      scale += delta ? delta.getValueAsDouble() : upscale.getUpFactor();
     }
   }
   op->setAttr("earth.actual_scale", FloatAttr::get(Float64Type::get(op->getContext()), scale));
@@ -200,7 +231,7 @@ void addOperationNamesTo(SmallVectorImpl<StringRef> &names) {
       0, (names.push_back(Args::getOperationName()), 0)...};
 }
 
-std::map<std::string, llvm::SmallVector<int64_t>>
+const std::map<std::string, llvm::SmallVector<int64_t>> &
 hecate::earth::EarthDialect::getLatencyTable() {
   return latencyTable;
 }
@@ -293,7 +324,7 @@ void hecate::earth::RotateOp::getCanonicalizationPatterns(
   auto op = RescaleOpAdaptor(operands, attributes, properties, regions);
   auto lScale = earth::getScaleType(op.getValue());
   if (!EarthDialect::nativeModuli.empty()) {
-    auto index = EarthDialect::nativeOutputLevel - lScale.getLevel();
+    auto index = EarthDialect::nativeLevelAnchor - lScale.getLevel();
     if (index < 1) return failure();
     double scale = actualScale(op.getValue()) -
         std::log2(static_cast<double>(EarthDialect::nativeModuli.at(index)));
@@ -369,7 +400,7 @@ void hecate::earth::BootstrapOp::getCanonicalizationPatterns(
   // accumulated scale > maximum scale limit
   const auto budget = EarthDialect::nativeModuli.empty()
       ? EarthDialect::bootstrapLevelUpperBound - EarthDialect::bootstrapLevelLowerBound
-      : EarthDialect::nativeOutputLevel - EarthDialect::nativeLowerLevel;
+      : EarthDialect::nativeLevelAnchor - EarthDialect::nativeLowerLevel;
   if (lScale.getLevel() <= budget) {
     auto result = lScale.switchLevel(op.getTargetLevel());
     if (op.getTargetScale() > 0)

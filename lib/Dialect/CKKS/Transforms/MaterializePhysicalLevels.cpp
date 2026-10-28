@@ -1,5 +1,6 @@
 #include "hecate/Dialect/CKKS/IR/CKKSOps.h"
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
+#include "hecate/Support/BootstrapInputAlignment.h"
 #include "hecate/Dialect/CKKS/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "nlohmann/json.hpp"
@@ -33,6 +34,7 @@ using Json = nlohmann::json;
 struct PhysicalLevelSpec {
   uint64_t lowerBound = 0;
   uint64_t upperBound = 0;
+  uint64_t levelAnchor = 0;
   uint64_t maxRescaleLevels = 0;
   std::vector<uint64_t> modulusBits;
   std::vector<int64_t> moduli;
@@ -144,8 +146,7 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
       func.emitError("Boot output level is outside the physical chain");
       return failure();
     }
-    // Use the same recoverable working chain for inputs and refreshed values.
-    // Context primes above this anchor remain available inside native Boot.
+    // Boot output and initial input may use different prefixes of one chain.
     result.upperBound = static_cast<uint64_t>(anchor);
     result.bootOutputScale = (*selected)["output_scale_log2"].get<int64_t>();
     if (*result.bootOutputScale <= 0) {
@@ -165,13 +166,22 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
       auto inputLevel = (*selected)["input_level_min"].get<int64_t>();
       auto inputMax = (*selected)["input_level_max"].get<int64_t>();
       if (!result.nativeRescale || inputLevel < signedLower ||
-          inputMax < inputLevel || inputMax > signedUpper || inputLevel + 2 > anchor) {
-        func.emitError("native Boot input alignment requires two Q above its input level");
+          inputMax < inputLevel || inputMax > signedUpper || inputLevel > anchor) {
+        func.emitError("native Boot input level exceeds its output level");
         return failure();
       }
       result.bootInputScale = (*selected)["input_scale_log2"].get<int64_t>();
       result.bootInputLevel = static_cast<uint64_t>(inputLevel);
     }
+  }
+  result.levelAnchor = result.upperBound;
+  if (auto initial = func->getAttrOfType<IntegerAttr>("earth.native_level_anchor")) {
+    if (!result.nativeRescale || initial.getInt() < static_cast<int64_t>(result.upperBound) ||
+        initial.getInt() > signedUpper) {
+      func.emitError("native input anchor is outside the physical Q chain");
+      return failure();
+    }
+    result.levelAnchor = initial.getInt();
   }
   result.modulusBits.reserve(moduli->size());
   for (const Json &bits : *moduli) {
@@ -255,7 +265,9 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
     auto *op = &operation;
     if (op->getNumResults() == 0) continue;
     if (auto encode = dyn_cast<ckks::EncodeOp>(op)) {
-      annotate(op, ckks::getPolyType(encode.getResult()).getScaleLog2());
+      auto planned = op->getAttrOfType<FloatAttr>("runtime.scale_log2");
+      annotate(op, planned ? planned.getValueAsDouble()
+                          : ckks::getPolyType(encode.getResult()).getScaleLog2());
       continue;
     }
     if (auto boot = dyn_cast<ckks::BootstrapCOp>(op)) {
@@ -268,17 +280,12 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
         double scale = scales.lookup(input);
         if (poly.getLevel() < targetLevel)
           return op->emitError("native Boot input is below the required level");
-        unsigned drops = 0;
-        double plainScale = targetScale - scale;
-        if (std::abs(scale - targetScale) > 1e-8) {
-          // Prefer one Q, but keep enough encoding precision for the unit.
-          do {
-            ++drops;
-            if (targetLevel + drops > poly.getLevel())
-              return op->emitError("native Boot scale alignment has insufficient Q/encoding precision");
-            plainScale += std::log2(static_cast<double>(spec.moduli.at(targetLevel + drops)));
-          } while (plainScale < 30);
-        }
+        auto alignment = hecate::planBootstrapInputAlignment(
+            spec.moduli, poly.getLevel(), scale, targetLevel, targetScale);
+        if (!alignment)
+          return op->emitError("native Boot scale alignment has insufficient Q/encoding precision");
+        const auto drops = alignment->drops;
+        const double plainScale = alignment->plaintextScale;
         builder.setInsertionPoint(op);
         auto typeAt = [&](unsigned level, double actual, unsigned components) {
           auto element = poly.switchLevel(level)
@@ -294,10 +301,8 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
           input = mod.getResult();
         }
         if (drops) {
-          double capacity = 0;
-          for (unsigned i = 0; i <= targetLevel + drops; ++i)
-            capacity += std::log2(static_cast<double>(spec.moduli.at(i)));
-          if (!std::isfinite(plainScale) || scale + plainScale >= capacity)
+          if (!std::isfinite(plainScale) ||
+              scale + plainScale >= alignment->capacity)
             return op->emitError("native Boot alignment exceeds the modulus capacity");
           auto payloadType = RankedTensorType::get(
               {hecate::earth::EarthDialect::polynomialDegree / 2}, builder.getF64Type());
@@ -427,12 +432,12 @@ FailureOr<unsigned> mapLevel(uint64_t logicalLevel, uint64_t logicalBase,
   }
   const uint64_t consumedLogicalLevels = logicalBase - logicalLevel;
   if (consumedLogicalLevels >
-      (spec.upperBound - spec.lowerBound) / levelFactor) {
+      (spec.levelAnchor - spec.lowerBound) / levelFactor) {
     op->emitError("logical CKKS level requires a physical level below the "
                   "OperatorSpec lower_bound");
     return failure();
   }
-  return static_cast<unsigned>(spec.upperBound -
+  return static_cast<unsigned>(spec.levelAnchor -
                                consumedLogicalLevels * levelFactor);
 }
 
@@ -655,7 +660,7 @@ struct MaterializePhysicalLevelsPass
     func->setAttr("ckks.levels_per_logical_level",
                   builder.getI64IntegerAttr(static_cast<int64_t>(levelFactor)));
     func->setAttr("init_level", builder.getI64IntegerAttr(
-                                    static_cast<int64_t>(spec->upperBound)));
+                                    static_cast<int64_t>(spec->levelAnchor)));
   }
 };
 

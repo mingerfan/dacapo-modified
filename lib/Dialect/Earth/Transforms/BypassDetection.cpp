@@ -114,7 +114,9 @@ struct BypassDetectionPass
       if (!isa<hecate::earth::BootstrapOp>(op) &&
           (id < from || (hecate::earth::usesNativeScalePlanning() && from && id == from)))
         continue;
-      auto result = hecate::earth::applyThresholdScale(op, waterline, scale);
+      // This abstract suffix starts at a refreshed frontier; its raw prefix
+      // has no actual input states. Real candidate replay checks Boot inputs.
+      auto result = hecate::earth::applyThresholdScale(op, waterline, scale, false);
       if (failed(result)) {
         op->emitError("type inference failed during Boot bypass analysis");
         return failure();

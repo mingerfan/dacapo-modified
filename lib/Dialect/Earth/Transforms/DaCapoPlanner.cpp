@@ -5,7 +5,6 @@
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
-#include <algorithm>
 #include <map>
 
 namespace hecate::earth {
@@ -32,15 +31,16 @@ struct DaCapoPlannerPass
       SmallVector<Type, 4> types;
       SmallVector<double, 4> scales;
     };
-    // Bypassed ciphertexts retain scale and consumed Q. Different frontier
-    // states must survive the DP even when a cheaper state exists at that cut.
-    std::map<int64_t, SmallVector<Plan>> plans;
+    // Keep one cheapest prefix per cut. Its live ciphertext types and actual
+    // scales include bypassed values and are replayed in the next segment.
+    std::map<int64_t, Plan> plans;
     SmallVector<Type, 4> inputs;
     for (auto argument : func.getArguments())
       inputs.push_back(
           hecate::earth::getScaleType(argument).switchScale(waterline));
-    SmallVector<double, 4> inputScales(inputs.size(), static_cast<double>(waterline));
-    plans[0].push_back({0, {}, inputs, inputScales});
+    SmallVector<double, 4> inputScales(inputs.size(),
+                                       static_cast<double>(waterline));
+    plans[0] = {0, {}, inputs, inputScales};
     OwningOpRef<ModuleOp> module = ModuleOp::create(func.getLoc());
     PassManager pm(func.getContext()), coverage(func.getContext());
     pm.addNestedPass<func::FuncOp>(
@@ -49,7 +49,8 @@ struct DaCapoPlannerPass
     pm.addNestedPass<func::FuncOp>(hecate::earth::createProactiveRescaling(
         {waterline, output_val, bootstrap_scale}));
     pm.addNestedPass<func::FuncOp>(hecate::earth::createEarlyModswitch());
-    pm.addNestedPass<func::FuncOp>(hecate::earth::createAbsorbCoefficientScale({waterline}));
+    pm.addNestedPass<func::FuncOp>(
+        hecate::earth::createAbsorbCoefficientScale({waterline}));
     pm.addPass(createCanonicalizerPass());
     pm.addPass(createCSEPass());
     pm.addNestedPass<func::FuncOp>(hecate::earth::createLatencyEstimator());
@@ -71,88 +72,101 @@ struct DaCapoPlannerPass
                     builder.getDenseI64ArrayAttr(
                         from ? ca.getValueInfo(from)->getLiveOuts()
                              : SmallVector<int64_t, 4>{}));
-      copy->setAttr("segment_inputType", builder.getTypeArrayAttr(state.types));
-      if (hecate::earth::usesNativeScalePlanning())
-        copy->setAttr("segment_input_scales", builder.getDenseF64ArrayAttr(state.scales));
       copy->setAttr("segment_return", builder.getDenseI64ArrayAttr(
                                           ca.getValueInfo(to)->getLiveOuts()));
+      copy->setAttr("segment_inputType", builder.getTypeArrayAttr(state.types));
+      if (hecate::earth::usesNativeScalePlanning())
+        copy->setAttr("segment_input_scales",
+                      builder.getDenseF64ArrayAttr(state.scales));
       module->push_back(copy);
       return copy;
     };
     for (auto to : ca.getCandidates()) {
+      SmallVector<size_t, 4> refreshedInputs;
+      if (to && to != ca.getRetOpid()) {
+        auto targets = ca.getTargets(to, selected);
+        auto liveOuts = ca.getValueInfo(to)->getLiveOuts();
+        for (size_t i = 0; i < liveOuts.size(); ++i)
+          if (llvm::is_contained(targets, liveOuts[i]))
+            refreshedInputs.push_back(inputs.size() + i);
+      }
       if (to) {
         for (auto from : ca.toFromMap[to]) {
-          auto predecessors = plans.find(from);
-          if (predecessors == plans.end())
+          auto predecessor = plans.find(from);
+          if (predecessor == plans.end())
             continue;
-          for (const auto &state : predecessors->second)
-            for (bool initial : {false, true}) {
-              if (initial && (from || initialTargets.empty()))
-                continue;
-              auto copy = segment(from, to, state, initial);
-              LogicalResult feasible = failure();
-              {
-                ScopedDiagnosticHandler diagnostics(
-                    func.getContext(), [](Diagnostic &) { return success(); });
-                feasible = pm.run(*module);
-              }
-              if (succeeded(feasible)) {
-                Plan candidate = state;
-                candidate.cost += copy->getAttrOfType<FloatAttr>("est_latency")
-                                      .getValueAsDouble();
-                if (initial)
-                  candidate.cuts.push_back(0);
-                candidate.cuts.push_back(to);
-                candidate.types = inputs;
-                candidate.types.append(copy.getResultTypes().begin(),
-                                       copy.getResultTypes().end());
-                candidate.scales = inputScales;
-                if (hecate::earth::usesNativeScalePlanning())
-                  for (Value value : copy.front().getTerminator()->getOperands())
-                    candidate.scales.push_back(hecate::earth::actualScale(value));
-                auto &states = plans[to];
-                auto same = llvm::find_if(states, [&](const Plan &other) {
-                  return other.types == candidate.types && other.scales == candidate.scales;
-                });
-                if (same == states.end())
-                  states.push_back(std::move(candidate));
-                else if (candidate.cost < same->cost)
-                  *same = std::move(candidate);
-              }
-              copy.erase();
+          const auto &state = predecessor->second;
+          for (bool initial : {false, true}) {
+            if (initial && (from || initialTargets.empty()))
+              continue;
+            auto copy = segment(from, to, state, initial);
+            LogicalResult feasible = failure();
+            {
+              ScopedDiagnosticHandler diagnostics(
+                  func.getContext(), [](Diagnostic &) { return success(); });
+              feasible = pm.run(*module);
             }
+            if (succeeded(feasible)) {
+              Plan candidate = state;
+              candidate.cost += copy->getAttrOfType<FloatAttr>("est_latency")
+                                    .getValueAsDouble();
+              if (initial)
+                candidate.cuts.push_back(0);
+              candidate.cuts.push_back(to);
+              candidate.types = inputs;
+              candidate.types.append(copy.getResultTypes().begin(),
+                                     copy.getResultTypes().end());
+              candidate.scales = inputScales;
+              if (hecate::earth::usesNativeScalePlanning())
+                for (Value value : copy.front().getTerminator()->getOperands())
+                  candidate.scales.push_back(hecate::earth::actualScale(value));
+              if (hecate::earth::usesNativeScalePlanning() &&
+                  !llvm::all_of(refreshedInputs, [&](size_t i) {
+                    auto type = cast<hecate::earth::HEScaleTypeInterface>(
+                        candidate.types[i]);
+                    return hecate::earth::canBootstrap(
+                        {static_cast<int64_t>(type.getLevel()),
+                         candidate.scales[i]});
+                  })) {
+                copy.erase();
+                continue;
+              }
+              auto current = plans.find(to);
+              if (current == plans.end() ||
+                  candidate.cost < current->second.cost)
+                plans.insert_or_assign(to, std::move(candidate));
+            }
+            copy.erase();
+          }
         }
       }
-      auto states = plans.find(to);
-      if (states == plans.end() || to == ca.getRetOpid())
+      auto state = plans.find(to);
+      if (state == plans.end() || to == ca.getRetOpid())
         continue;
-      for (const auto &state : states->second)
-        for (bool initial : {false, true}) {
-          if (initial && (to || initialTargets.empty()))
-            continue;
-          auto copy = segment(to, ca.getRetOpid(), state, initial);
-          if (failed(coverage.run(*module))) {
-            copy.erase();
-            func.emitError("DaCapo coverage analysis failed");
-            return signalPassFailure();
-          }
-          auto ends =
-              copy->getAttrOfType<DenseI64ArrayAttr>("coverages").asArrayRef();
-          ca.pushFromCoverage(to, SmallVector<int64_t, 2>(ends));
+      for (bool initial : {false, true}) {
+        if (initial && (to || initialTargets.empty()))
+          continue;
+        auto copy = segment(to, ca.getRetOpid(), state->second, initial);
+        if (failed(coverage.run(*module))) {
           copy.erase();
+          func.emitError("DaCapo coverage analysis failed");
+          return signalPassFailure();
         }
+        auto ends =
+            copy->getAttrOfType<DenseI64ArrayAttr>("coverages").asArrayRef();
+        ca.pushFromCoverage(to, SmallVector<int64_t, 2>(ends));
+        copy.erase();
+      }
     }
     auto result = plans.find(ca.getRetOpid());
-    if (result == plans.end() || result->second.empty()) {
-      func.emitError("no feasible DaCapo plan for the threshold Q budget");
+    if (result == plans.end()) {
+      func.emitError("no feasible DaCapo plan after single-prefix pruning");
       return signalPassFailure();
     }
-    auto best = std::min_element(
-        result->second.begin(), result->second.end(),
-        [](const Plan &a, const Plan &b) { return a.cost < b.cost; });
+    const auto &best = result->second;
     SmallVector<Attribute> schedule;
     SmallVector<int64_t> targets;
-    for (auto cut : best->cuts) {
+    for (auto cut : best.cuts) {
       if (cut == ca.getRetOpid())
         continue;
       auto refresh = cut ? ca.getTargets(cut, selected) : initialTargets;
@@ -165,8 +179,8 @@ struct DaCapoPlannerPass
     }
     func->setAttr("btp_schedule", builder.getArrayAttr(schedule));
     func->setAttr("btp_target", builder.getDenseI64ArrayAttr(targets));
-    func->setAttr("planned_latency", builder.getF64FloatAttr(best->cost));
-    llvm::outs() << "Estimated Latency: " << best->cost / 1000000 << " (sec)\n"
+    func->setAttr("planned_latency", builder.getF64FloatAttr(best.cost));
+    llvm::outs() << "Estimated Latency: " << best.cost / 1000000 << " (sec)\n"
                  << "Number of Bootstrapping: " << targets.size() << '\n';
     markAnalysesPreserved<hecate::CandidateAnalysis>();
   }
