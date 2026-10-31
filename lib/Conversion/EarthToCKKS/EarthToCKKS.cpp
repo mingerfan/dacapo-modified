@@ -140,8 +140,10 @@ LogicalResult
 ConstantOpLowering::matchAndRewrite(hecate::earth::ConstantOp op,
                                     OpAdaptor adaptor,
                                     ConversionPatternRewriter &rewriter) const {
-  rewriter.replaceOpWithNewOp<ckks::EncodeOp>(
+  auto encoding = op->getAttrOfType<FloatAttr>("earth.encoding_scale");
+  auto result = rewriter.replaceOpWithNewOp<ckks::EncodeOp>(
       op, getTypeConverter()->convertType(op.getType()), adaptor.getValue());
+  if (encoding) result->setAttr("runtime.scale_log2", encoding);
   return success();
 }
 

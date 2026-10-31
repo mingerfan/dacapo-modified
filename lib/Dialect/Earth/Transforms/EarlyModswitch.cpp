@@ -36,6 +36,7 @@ struct EarlyModswitchPass
 
   void runOnOperation() override {
     auto func = getOperation();
+    if (func->hasAttr("earth.region_scale_policy")) return;
     markAnalysesPreserved<hecate::ScaleManagementUnit>();
 
     mlir::OpBuilder builder(func);

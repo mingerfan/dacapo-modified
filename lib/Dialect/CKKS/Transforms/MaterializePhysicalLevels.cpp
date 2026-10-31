@@ -296,8 +296,12 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
           return RankedTensorType::get(inputType.getShape(), element);
         };
         if (poly.getLevel() > targetLevel + drops) {
+          auto modType = cast<RankedTensorType>(typeAt(targetLevel + drops, scale, poly.getComponents()));
+          auto modPoly = cast<ckks::PolyTypeInterface>(modType.getElementType());
+          modType = RankedTensorType::get(modType.getShape(),
+              modPoly.switchScaleLog2(ckks::getPolyType(input).getScaleLog2()));
           auto mod = builder.create<ckks::ModswitchCOp>(op->getLoc(),
-              typeAt(targetLevel + drops, scale, poly.getComponents()), input,
+              modType, input,
               poly.getLevel() - targetLevel - drops);
           annotate(mod, scale);
           input = mod.getResult();
@@ -341,7 +345,8 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
       auto target = ckks::getPolyType(rescale.getResult());
       scale = chain.rescale(scale, source.getLevel(), source.getLevel() - target.getLevel());
       if (auto floor = func->getAttrOfType<FloatAttr>("earth.scale_waterline");
-          floor && scale < floor.getValueAsDouble())
+          floor && scale < floor.getValueAsDouble() -
+              (func->hasAttr("earth.region_scale_policy") ? 1e-10 : 0))
         return op->emitError("native Rescale violates the planned scale waterline");
     } else if (auto add = dyn_cast<ckks::AddCPOp>(op)) {
       auto encode = add.getRhs().getDefiningOp<ckks::EncodeOp>();
@@ -354,6 +359,8 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
     } else if (auto add = dyn_cast<ckks::AddCCOp>(op)) {
       double rhs = scales.lookup(add.getRhs());
       if (std::abs(scale - rhs) > 1e-10) {
+        if (func->hasAttr("earth.region_scale_policy"))
+          return op->emitError("regional Add operands disagree in actual scale; refusing an unplanned unit multiplication");
         unsigned lower = scale < rhs ? 0 : 1;
         Value input = op->getOperand(lower);
         double target = std::max(scale, rhs);

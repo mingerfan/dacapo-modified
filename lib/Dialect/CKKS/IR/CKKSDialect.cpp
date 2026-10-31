@@ -192,6 +192,14 @@ void hecate::ckks::CKKSDialect::initialize() {
 }
 
 ::mlir::LogicalResult hecate::ckks::AddCCOp::verify() {
+  auto lhs = ckks::getPolyType(getLhs()), rhs = ckks::getPolyType(getRhs());
+  auto result = ckks::getPolyType(getResult());
+  auto func = (*this)->getParentOfType<func::FuncOp>();
+  if (lhs.getComponents() != rhs.getComponents() || result.getComponents() != lhs.getComponents() ||
+      lhs.getLevel() != rhs.getLevel() || result.getLevel() != lhs.getLevel() ||
+      ((!func || !func->hasAttr("earth.region_scale_policy")) &&
+       (getLhs().getType() != getRhs().getType() || getResult().getType() != getLhs().getType())))
+    return emitOpError("requires matching ciphertext levels, components and scales");
   if (ckks::getPolyType(getLhs()).getComponents() < 2)
     return emitOpError("operands and result must be ciphertext");
   return ::mlir::success();

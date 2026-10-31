@@ -35,6 +35,7 @@ namespace earth {
 ::hecate::earth::HEScaleTypeInterface getScaleType(mlir::Value v);
 ::mlir::RankedTensorType getTensorType(mlir::Value v);
 double actualScale(mlir::Value value);
+bool usesRegionalScalePlanning();
 } // namespace earth
 } // namespace hecate
 #endif

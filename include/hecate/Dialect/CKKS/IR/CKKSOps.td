@@ -85,7 +85,7 @@ def BootstrapCOp : CKKS_Op<"bootstrapc", [SameOperandsAndResultShape]> {
   let hasVerifier = 1;
 }
 
-def AddCCOp : CKKS_Op<"addcc", [Commutative, SameOperandsAndResultType]> {
+def AddCCOp : CKKS_Op<"addcc", [Commutative, SameOperandsAndResultShape]> {
   let arguments = (ins PolyTensor:$lhs, PolyTensor:$rhs);
   let hasVerifier = 1;
 }

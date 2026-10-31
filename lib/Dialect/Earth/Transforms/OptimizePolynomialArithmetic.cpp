@@ -73,7 +73,7 @@ struct AbsorbCoefficientScalePass
   }
   void runOnOperation() override {
     auto func = getOperation();
-    if (!func->hasAttr("absorb_coefficient_scale"))
+    if (func->hasAttr("earth.region_scale_policy") || !func->hasAttr("absorb_coefficient_scale"))
       return;
     IRRewriter rewriter(func.getContext());
     func.walk([&](UpscaleOp upscale) {

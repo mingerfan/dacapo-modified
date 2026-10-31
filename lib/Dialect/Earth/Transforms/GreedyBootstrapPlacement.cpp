@@ -1,6 +1,7 @@
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Dialect/Earth/IR/HEParameterInterface.h"
 #include "hecate/Dialect/Earth/Transforms/Common.h"
+#include "hecate/Dialect/Earth/Transforms/RegionalScalePlanning.h"
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
@@ -57,6 +58,20 @@ struct GreedyBootstrapPlacementPass
     for (auto &op : llvm::make_early_inc_range(llvm::reverse(func.front())))
       if (isOpTriviallyDead(&op))
         op.erase();
+
+    if (usesRegionalScalePlanning()) {
+      if (depth_dp) {
+        func.emitError("regional scale planning currently requires --boot-placement=greedy");
+        return signalPassFailure();
+      }
+      OpBuilder builder(func);
+      SmallVector<Type, 4> inputs;
+      refineInputValues(func, builder, inputs, waterline, output_val);
+      if (failed(planRegionalScales(func, waterline, bootScale, true)))
+        return signalPassFailure();
+      finishThresholdScale(func, builder, inputs);
+      return;
+    }
 
     // Keep the original use counts: the management operations inserted below
     // must not extend the lifetime of a logical value in this scan.

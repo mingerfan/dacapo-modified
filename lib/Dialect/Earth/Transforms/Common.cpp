@@ -138,6 +138,8 @@ void hecate::earth::finishThresholdScale(func::FuncOp func, OpBuilder &builder,
   auto result = cast<func::ReturnOp>(func.front().getTerminator());
   if (usesNativeScalePlanning()) {
     clearActualScales(func);
+    for (auto &op : func.front())
+      for (Value value : op.getResults()) actualScale(value);
     SmallVector<double> scales;
     for (Value value : result.getOperands()) scales.push_back(actualScale(value));
     func->setAttr("earth.result_scales", builder.getDenseF64ArrayAttr(scales));

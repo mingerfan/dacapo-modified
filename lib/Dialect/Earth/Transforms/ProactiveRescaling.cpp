@@ -7,6 +7,7 @@
 
 #include "hecate/Dialect/Earth/Analysis/ScaleManagementUnit.h"
 #include "hecate/Dialect/Earth/Transforms/Common.h"
+#include "hecate/Dialect/Earth/Transforms/RegionalScalePlanning.h"
 
 namespace hecate {
 namespace earth {
@@ -57,6 +58,12 @@ struct ProactiveRescalingPass
         func.emitError("input ciphertext exceeds the Boot Q budget");
         return signalPassFailure();
       }
+    if (hecate::earth::usesRegionalScalePlanning()) {
+      if (failed(hecate::earth::planRegionalScales(func, waterline, bootScale, false)))
+        return signalPassFailure();
+      hecate::earth::finishThresholdScale(func, builder, inputTypes);
+      return;
+    }
     SmallVector<hecate::earth::ForwardMgmtInterface> operations;
     func.walk([&](hecate::earth::ForwardMgmtInterface op) {
       operations.push_back(op);

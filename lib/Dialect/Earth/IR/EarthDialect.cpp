@@ -17,10 +17,19 @@
 using namespace mlir;
 
 namespace {
+llvm::cl::opt<std::string> scalePolicy(
+    "native-scale-policy", llvm::cl::desc("Native scale policy: threshold or regional"),
+    llvm::cl::init("threshold"));
 llvm::cl::opt<int64_t> nativeInputLevel(
     "native-input-level",
     llvm::cl::desc("Initial ciphertext level; defaults to the Boot output level"),
     llvm::cl::init(-1));
+}
+
+bool hecate::earth::usesRegionalScalePlanning() {
+  if (scalePolicy != "threshold" && scalePolicy != "regional")
+    llvm::report_fatal_error("native-scale-policy must be threshold or regional");
+  return scalePolicy == "regional";
 }
 
 #define GET_TYPEDEF_CLASSES
@@ -193,8 +202,11 @@ double hecate::earth::actualScale(Value value) {
     return type.getScale();
   }
   auto *op = value.getDefiningOp();
-  if (isa<ConstantOp>(op))
+  if (isa<ConstantOp>(op)) {
+    if (auto encoding = op->getAttrOfType<FloatAttr>("earth.encoding_scale"))
+      return encoding.getValueAsDouble();
     return type.getScale();
+  }
   if (auto cached = op->getAttrOfType<FloatAttr>("earth.actual_scale"))
     return cached.getValueAsDouble();
   double scale;
@@ -423,6 +435,12 @@ void hecate::earth::AddOp::getCanonicalizationPatterns(
   auto lTensor = earth::getTensorType(op.getLhs());
   auto rScale = earth::getScaleType(op.getRhs());
   auto rTensor = earth::getTensorType(op.getRhs());
+  if (usesRegionalScalePlanning() && lScale.isCipher() && rScale.isCipher() &&
+      lScale.getLevel() == rScale.getLevel() && lTensor.getShape() == rTensor.getShape() &&
+      std::abs(actualScale(op.getLhs()) - actualScale(op.getRhs())) <= 1e-8) {
+    inferredReturnTypes.push_back(lScale.switchScale(std::max(lScale.getScale(), rScale.getScale())));
+    return success();
+  }
   if (lScale.getLevel() == rScale.getLevel() &&
       lScale.getScale() == rScale.getScale() &&
       lTensor.getShape()[0] == rTensor.getShape()[0]) {
@@ -435,6 +453,7 @@ void hecate::earth::AddOp::getCanonicalizationPatterns(
 
 void hecate::earth::MulOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
+  if (usesRegionalScalePlanning()) return;
   /* patterns.add<MulZeroPattern, MulOnePattern, NegMulPattern>(context); */
   patterns.add<MulOnePattern, NegMulPattern>(context);
 }

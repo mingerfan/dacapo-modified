@@ -608,6 +608,8 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
   };
 
   auto addDaCapoPrecompile = [&, addPolynomialOptimization](OpPassManager &pm) {
+    if (earth::usesRegionalScalePlanning() && bootstrap_strategy == BootstrapStrategy::Optimized)
+      llvm::report_fatal_error("regional scale planning currently requires --boot-placement=greedy");
     earth::EarthDialect::setNativeScaleParameters(
         runtime_plan_physical_level_operator_spec_path, runtime_plan_boot_profile);
     std::string dir;
