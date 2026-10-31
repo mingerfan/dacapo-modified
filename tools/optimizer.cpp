@@ -306,6 +306,10 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       "runtime-plan-levels-per-logical-level",
       cl::desc("Physical RNS levels consumed by one logical CKKS level"),
       cl::init(1)};
+  static cl::opt<bool> runtime_plan_coalesce_rescales{
+      "runtime-plan-coalesce-rescales",
+      cl::desc("Share compatible native product-reduction Rescales before placement"),
+      cl::init(true)};
   static cl::opt<int64_t> runtime_plan_intra_rank_communication_cost{
       "runtime-plan-intra-rank-communication-cost",
       cl::desc("Fixed intra-rank point-to-point placement cost"),
@@ -370,6 +374,14 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
       physicalLevels.bootProfile = runtime_plan_boot_profile;
       pm.addNestedPass<func::FuncOp>(
           hecate::ckks::createMaterializePhysicalLevels(physicalLevels));
+    }
+    if (runtime_plan_coalesce_rescales) {
+      hecate::ckks::CoalesceReductionRescalesOptions reduction;
+      reduction.operatorSpecPath = runtime_plan_physical_level_operator_spec_path.empty()
+          ? runtime_plan_operator_spec_path.getValue()
+          : runtime_plan_physical_level_operator_spec_path.getValue();
+      pm.addNestedPass<func::FuncOp>(
+          hecate::ckks::createCoalesceReductionRescales(reduction));
     }
     if (!runtime_plan_device_counts.empty()) {
       hecate::ckks::AssignPlacementOptions placement;

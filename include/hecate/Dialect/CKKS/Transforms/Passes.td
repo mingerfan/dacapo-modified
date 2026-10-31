@@ -72,6 +72,20 @@ def MaterializePhysicalLevels : Pass<"materialize-ckks-physical-levels",
   ];
 }
 
+def CoalesceReductionRescales : Pass<"coalesce-reduction-rescales", "::mlir::func::FuncOp"> {
+  let summary = "Share native Rescales at the exit of compatible product reductions";
+  let description = [{
+    Runs after physical scale materialization and before placement. Preserves
+    the addition tree and its output level/scale. Shared values, rotations,
+    unequal source states and insufficient accumulation headroom are barriers.
+    Uses OperatorSpec latency to account for the higher-level additions.
+  }];
+  let options = [
+    Option<"operatorSpecPath", "operator-spec", "std::string", [{""}],
+           "Native OperatorSpec with AddCC and Rescale latency tables">
+  ];
+}
+
 def AssignPlacement : Pass<"assign-ckks-placement", "::mlir::func::FuncOp"> {
   let summary = "Assign CKKS compute operations to a static rank/place topology";
   let description = [{

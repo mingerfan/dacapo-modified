@@ -152,6 +152,7 @@ ConstantOpLowering::matchAndRewrite(hecate::earth::ConstantOp op,
 LogicalResult
 MulOpLowering::matchAndRewrite(hecate::earth::MulOp op, OpAdaptor adaptor,
                                ConversionPatternRewriter &rewriter) const {
+  auto fixed = op->getAttr("sm_fixed");
   auto resultType =
       getTypeConverter()->convertType(op.getType()).cast<RankedTensorType>();
   auto resultElementType =
@@ -165,11 +166,13 @@ MulOpLowering::matchAndRewrite(hecate::earth::MulOp op, OpAdaptor adaptor,
         op.getLoc(), mulType, adaptor.getLhs(), adaptor.getRhs());
     rewriter.replaceOpWithNewOp<ckks::RelinearizeOp>(op, resultType, mul);
   } else if (ckks::getPolyType(adaptor.getLhs()).getComponents() == 1) {
-    rewriter.replaceOpWithNewOp<ckks::MulCPOp>(op, resultType, adaptor.getRhs(),
-                                               adaptor.getLhs());
+    auto replacement = rewriter.replaceOpWithNewOp<ckks::MulCPOp>(
+        op, resultType, adaptor.getRhs(), adaptor.getLhs());
+    if (fixed) replacement->setAttr("sm_fixed", fixed);
   } else {
-    rewriter.replaceOpWithNewOp<ckks::MulCPOp>(op, resultType, adaptor.getLhs(),
-                                               adaptor.getRhs());
+    auto replacement = rewriter.replaceOpWithNewOp<ckks::MulCPOp>(
+        op, resultType, adaptor.getLhs(), adaptor.getRhs());
+    if (fixed) replacement->setAttr("sm_fixed", fixed);
   }
   return success();
 }
@@ -182,11 +185,13 @@ LogicalResult
 AddOpLowering::matchAndRewrite(hecate::earth::AddOp op, OpAdaptor adaptor,
                                ConversionPatternRewriter &rewriter) const {
   auto resultType = getTypeConverter()->convertType(op.getType());
+  auto fixed = op->getAttr("sm_fixed");
 
   if (ckks::getPolyType(adaptor.getLhs()).getComponents() > 1 &&
       ckks::getPolyType(adaptor.getRhs()).getComponents() > 1) {
-    rewriter.replaceOpWithNewOp<ckks::AddCCOp>(op, resultType, adaptor.getLhs(),
-                                               adaptor.getRhs());
+    auto replacement = rewriter.replaceOpWithNewOp<ckks::AddCCOp>(
+        op, resultType, adaptor.getLhs(), adaptor.getRhs());
+    if (fixed) replacement->setAttr("sm_fixed", fixed);
   } else if (ckks::getPolyType(adaptor.getLhs()).getComponents() == 1) {
     rewriter.replaceOpWithNewOp<ckks::AddCPOp>(op, resultType, adaptor.getRhs(),
                                                adaptor.getLhs());
@@ -244,8 +249,10 @@ LogicalResult
 RescaleOpLowering::matchAndRewrite(hecate::earth::RescaleOp op,
                                    OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter) const {
-  rewriter.replaceOpWithNewOp<ckks::RescaleCOp>(
+  auto fixed = op->getAttr("sm_fixed");
+  auto replacement = rewriter.replaceOpWithNewOp<ckks::RescaleCOp>(
       op, getTypeConverter()->convertType(op.getType()), adaptor.getValue());
+  if (fixed) replacement->setAttr("sm_fixed", fixed);
   return success();
 }
 

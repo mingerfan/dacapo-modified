@@ -2,6 +2,7 @@
 add_mlir_dialect_library(CKKSTransforms
   AssignPlacement.cpp
   MaterializePhysicalLevels.cpp
+  CoalesceReductionRescales.cpp
   MaterializeCommunication.cpp
   EmitRuntimePlan.cpp
   RuntimePlanUtils.cpp

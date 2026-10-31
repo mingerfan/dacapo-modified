@@ -3,6 +3,12 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_executable(DacapoModulusChainTest Support/ModulusChainTest.cpp)
 add_test(NAME DacapoModulusChain COMMAND DacapoModulusChainTest)
 
+add_test(NAME DacapoReductionRescales
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-reduction-rescales.py
+          --hecate-opt $<TARGET_FILE:hecate-opt>
+          --source-dir ${PROJECT_SOURCE_DIR})
+
 add_test(NAME DacapoNativePlanning
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-native-planning.py
