@@ -75,7 +75,9 @@ def main():
             assert all(0 <= v['scale_log2'] < 140 for v in plan['values'])
             # Boot consumes no extra rescale and requires no Host round trip.
             rescales = [s for s in plan['execution'] if s.get('op') == 'rescale']
-            assert 40 < len(rescales) < 60
+            # Each of the 40 squares needs at least one RS. Optimized may
+            # refresh before every square, leaving exactly 40 RS in the plan.
+            assert 40 <= len(rescales) < 60, (args.strategy, boot_scale, len(rescales))
             assert all(values[s['inputs'][0]]['level'] - values[s['output']]['level'] == 1 for s in rescales)
             for phase in ('initialization', 'execution', 'finalization'):
                 for step in plan[phase]:

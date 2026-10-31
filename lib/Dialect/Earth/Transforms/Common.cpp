@@ -30,11 +30,10 @@ bool hecate::earth::canBootstrap(ScaleState state) {
   if (!usesNativeScalePlanning() || EarthDialect::nativeBootInputScale == 0)
     return true;
   auto alignment = hecate::planBootstrapInputAlignment(
-      EarthDialect::nativeModuli, EarthDialect::nativeLevelAnchor - state.level,
+      EarthDialect::nativeScaleChain, EarthDialect::nativeLevelAnchor - state.level,
       state.scale, EarthDialect::nativeBootInputLevel,
       EarthDialect::nativeBootInputScale);
-  return alignment && (!alignment->drops ||
-                       state.scale + alignment->plaintextScale < alignment->capacity);
+  return alignment.has_value();
 }
 
 hecate::earth::ScaleState hecate::earth::normalizeScaleState(
@@ -46,13 +45,12 @@ hecate::earth::ScaleState hecate::earth::normalizeScaleState(
     }
     return state;
   }
-  while (EarthDialect::nativeLevelAnchor - state.level >= 0) {
-    auto index = EarthDialect::nativeLevelAnchor - state.level;
-    double next = state.scale - std::log2(static_cast<double>(EarthDialect::nativeModuli[index]));
-    if (next < waterline) break;
-    state.scale = next;
-    ++state.level;
-  }
+  if (state.level > EarthDialect::nativeLevelAnchor)
+    return state;
+  auto normalized = EarthDialect::nativeScaleChain.normalize(
+      state.scale, EarthDialect::nativeLevelAnchor - state.level, waterline);
+  state.scale = normalized.scale;
+  state.level += normalized.drops;
   return state;
 }
 

@@ -121,6 +121,7 @@ int64_t hecate::earth::EarthDialect::bootstrapLevelUpperBound;
 int64_t hecate::earth::EarthDialect::levelUpperBound;
 int64_t hecate::earth::EarthDialect::levelLowerBound;
 std::vector<int64_t> hecate::earth::EarthDialect::nativeModuli;
+hecate::ModulusChain hecate::earth::EarthDialect::nativeScaleChain;
 int64_t hecate::earth::EarthDialect::nativeOutputLevel = -1;
 int64_t hecate::earth::EarthDialect::nativeLevelAnchor = -1;
 int64_t hecate::earth::EarthDialect::nativeLowerLevel = -1;
@@ -134,6 +135,7 @@ void hecate::earth::EarthDialect::setNativeScaleParameters(
     std::exit(1);
   };
   nativeModuli.clear();
+  nativeScaleChain = {};
   nativeOutputLevel = nativeLowerLevel = nativeLevelAnchor = -1;
   nativeBootInputLevel = -1;
   nativeBootInputScale = 0;
@@ -178,6 +180,7 @@ void hecate::earth::EarthDialect::setNativeScaleParameters(
   for (auto q : nativeModuli)
     if (q <= 1 || q >= (int64_t{1} << 53))
       fail("moduli must be in (1, 2^53)");
+  nativeScaleChain.reset(nativeModuli);
 }
 
 double hecate::earth::actualScale(Value value) {
@@ -210,8 +213,8 @@ double hecate::earth::actualScale(Value value) {
         scale = actualScale(add.getRhs());
     } else if (auto rescale = dyn_cast<RescaleOp>(op)) {
       auto consumed = getScaleType(rescale.getValue()).getLevel();
-      scale -= std::log2(static_cast<double>(
-          EarthDialect::nativeModuli.at(EarthDialect::nativeLevelAnchor - consumed)));
+      scale = EarthDialect::nativeScaleChain.rescale(
+          scale, EarthDialect::nativeLevelAnchor - consumed);
     } else if (auto upscale = dyn_cast<UpscaleOp>(op)) {
       scale += upscale.getUpFactor();
     }
@@ -321,8 +324,7 @@ void hecate::earth::RotateOp::getCanonicalizationPatterns(
   if (!EarthDialect::nativeModuli.empty()) {
     auto index = EarthDialect::nativeLevelAnchor - lScale.getLevel();
     if (index < 1) return failure();
-    double scale = actualScale(op.getValue()) -
-        std::log2(static_cast<double>(EarthDialect::nativeModuli.at(index)));
+    double scale = EarthDialect::nativeScaleChain.rescale(actualScale(op.getValue()), index);
     if (scale < 0) return failure();
     inferredReturnTypes.push_back(lScale.switchLevel(lScale.getLevel() + 1)
                                       .switchScale(static_cast<unsigned>(std::ceil(scale))));

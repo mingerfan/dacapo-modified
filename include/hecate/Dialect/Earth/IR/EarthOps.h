@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "hecate/Support/Support.h"
+#include "hecate/Support/ModulusChain.h"
 
 #include "hecate/Dialect/Earth/IR/ForwardManagementInterface.h"
 #include "hecate/Dialect/Earth/IR/HEParameterInterface.h"

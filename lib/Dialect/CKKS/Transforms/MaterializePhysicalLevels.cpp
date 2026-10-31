@@ -252,6 +252,8 @@ FailureOr<PhysicalLevelSpec> readPhysicalLevelSpec(llvm::StringRef path,
 }
 
 LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec &spec) {
+  hecate::ModulusChain chain;
+  chain.reset(spec.moduli);
   llvm::DenseMap<Value, double> scales;
   auto arguments = func->getAttrOfType<DenseF64ArrayAttr>("earth.arg_scales");
   for (auto [i, arg] : llvm::enumerate(func.getArguments()))
@@ -281,7 +283,7 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
         if (poly.getLevel() < targetLevel)
           return op->emitError("native Boot input is below the required level");
         auto alignment = hecate::planBootstrapInputAlignment(
-            spec.moduli, poly.getLevel(), scale, targetLevel, targetScale);
+            chain, poly.getLevel(), scale, targetLevel, targetScale);
         if (!alignment)
           return op->emitError("native Boot scale alignment has insufficient Q/encoding precision");
         const auto drops = alignment->drops;
@@ -301,9 +303,6 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
           input = mod.getResult();
         }
         if (drops) {
-          if (!std::isfinite(plainScale) ||
-              scale + plainScale >= alignment->capacity)
-            return op->emitError("native Boot alignment exceeds the modulus capacity");
           auto payloadType = RankedTensorType::get(
               {hecate::earth::EarthDialect::polynomialDegree / 2}, builder.getF64Type());
           auto one = DenseElementsAttr::get(payloadType, builder.getF64FloatAttr(1.0));
@@ -318,7 +317,7 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
           annotate(multiplied, scale);
           input = multiplied.getResult();
           for (unsigned remaining = drops; remaining > 0; --remaining) {
-            scale -= std::log2(static_cast<double>(spec.moduli.at(targetLevel + remaining)));
+            scale = chain.rescale(scale, targetLevel + remaining);
             auto rescale = builder.create<ckks::RescaleCOp>(op->getLoc(),
                 typeAt(targetLevel + remaining - 1, scale, poly.getComponents()), input);
             annotate(rescale, scale);
@@ -340,8 +339,7 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
     } else if (auto rescale = dyn_cast<ckks::RescaleCOp>(op)) {
       auto source = ckks::getPolyType(rescale.getSrc());
       auto target = ckks::getPolyType(rescale.getResult());
-      for (unsigned level = source.getLevel(); level > target.getLevel(); --level)
-        scale -= std::log2(static_cast<double>(spec.moduli.at(level)));
+      scale = chain.rescale(scale, source.getLevel(), source.getLevel() - target.getLevel());
       if (auto floor = func->getAttrOfType<FloatAttr>("earth.scale_waterline");
           floor && scale < floor.getValueAsDouble())
         return op->emitError("native Rescale violates the planned scale waterline");
@@ -403,9 +401,7 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
       return op->emitError("actual CKKS scale is outside the supported range");
     if (func->hasAttr("earth.native_scale_moduli") &&
         ckks::getPolyType(op->getResult(0)).getComponents() > 1) {
-      double capacity = 0;
-      for (unsigned i = 0; i <= ckks::getPolyType(op->getResult(0)).getLevel(); ++i)
-        capacity += std::log2(static_cast<double>(spec.moduli[i]));
+      double capacity = chain.capacity(ckks::getPolyType(op->getResult(0)).getLevel());
       if (scale >= capacity)
         return op->emitError("actual CKKS scale exceeds the remaining modulus capacity");
     }

@@ -1,6 +1,7 @@
 #ifndef HECATE_SUPPORT_BOOTSTRAPINPUTALIGNMENT_H
 #define HECATE_SUPPORT_BOOTSTRAPINPUTALIGNMENT_H
 
+#include "hecate/Support/ModulusChain.h"
 #include <cmath>
 #include <optional>
 
@@ -12,28 +13,41 @@ struct BootstrapInputAlignment {
 };
 
 // ModSwitch to the smallest prefix that permits a >=30-bit encoded-one
-// alignment, then Rescale to the Boot input level. Scales are log2 values.
-template <class Moduli>
-std::optional<BootstrapInputAlignment>
-planBootstrapInputAlignment(const Moduli &moduli, unsigned sourceLevel,
+// alignment, then Rescale to the Boot input level. The returned plan includes
+// the capacity check, so planning and materialization accept the same states.
+// Chain preprocessing is O(L); each query is O(log L).
+inline std::optional<BootstrapInputAlignment>
+planBootstrapInputAlignment(const ModulusChain &chain, unsigned sourceLevel,
                             double scale, unsigned targetLevel,
                             double targetScale) {
-  if (sourceLevel < targetLevel || sourceLevel >= moduli.size() ||
-      !std::isfinite(scale))
+  if (sourceLevel < targetLevel || sourceLevel >= chain.size() ||
+      !std::isfinite(scale) || scale < 0 || !std::isfinite(targetScale) ||
+      targetScale < 0 || scale >= chain.capacity(sourceLevel) ||
+      targetScale >= chain.capacity(targetLevel))
     return std::nullopt;
-  double plain = targetScale - scale;
-  if (std::abs(plain) <= 1e-8)
-    return BootstrapInputAlignment{0, plain, 0};
-  for (unsigned drops = 1; targetLevel + drops <= sourceLevel; ++drops) {
-    plain += std::log2(static_cast<double>(moduli.at(targetLevel + drops)));
-    if (plain < 30)
-      continue;
-    double capacity = 0;
-    for (unsigned i = 0; i <= targetLevel + drops; ++i)
-      capacity += std::log2(static_cast<double>(moduli.at(i)));
-    return BootstrapInputAlignment{drops, plain, capacity};
+  if (std::abs(targetScale - scale) <= 1e-8) {
+    if (scale >= chain.capacity(targetLevel))
+      return std::nullopt;
+    return BootstrapInputAlignment{0, 0, chain.capacity(targetLevel)};
   }
-  return std::nullopt;
+  auto plaintextScale = [&](unsigned drops) {
+    return targetScale - scale + chain.removedLog2(targetLevel + drops, drops);
+  };
+  unsigned low = 1, high = sourceLevel - targetLevel;
+  if (high == 0 || plaintextScale(high) < 30)
+    return std::nullopt;
+  while (low < high) {
+    unsigned mid = low + (high - low) / 2;
+    if (plaintextScale(mid) >= 30)
+      high = mid;
+    else
+      low = mid + 1;
+  }
+  double plain = plaintextScale(low);
+  double capacity = chain.capacity(targetLevel + low);
+  if (!std::isfinite(plain) || scale + plain >= capacity)
+    return std::nullopt;
+  return BootstrapInputAlignment{low, plain, capacity};
 }
 } // namespace hecate
 #endif

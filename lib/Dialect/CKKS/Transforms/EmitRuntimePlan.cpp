@@ -3,6 +3,7 @@
 #include "hecate/Dialect/CKKS/Transforms/RuntimePlanUtils.h"
 #include "RuntimePlanBinaryWriter.h"
 #include "hecate/Dialect/Dist/IR/DistOps.h"
+#include "hecate/Support/ModulusChain.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "nlohmann/json.hpp"
@@ -660,7 +661,10 @@ struct RuntimePlanBuilder {
                      uint64_t inlinePayloadMaxBytes, bool profile)
       : func(func), contextId(contextId), ntt(ntt), bootProfile(bootProfile),
         bootImplementation(bootImplementation), bundle(bundle),
-        inlinePayloadMaxBytes(inlinePayloadMaxBytes), profile(profile) {}
+        inlinePayloadMaxBytes(inlinePayloadMaxBytes), profile(profile) {
+    if (auto moduli = func->getAttrOfType<DenseI64ArrayAttr>("ckks.rns_moduli"))
+      scaleChain.reset(moduli.asArrayRef());
+  }
 
   template<class Writer> LogicalResult write(Writer &writer) {
     if (!func.getBody().hasOneBlock())
@@ -825,8 +829,8 @@ private:
           if (failed(rhs)) return failure();
           scale += *rhs;
         } else if (auto rescale = dyn_cast<ckks::RescaleCOp>(op)) {
-          for (unsigned level = ckks::getPolyType(rescale.getSrc()).getLevel(); level > type.getLevel(); --level)
-            scale -= std::log2(static_cast<double>(moduli.asArrayRef()[level]));
+          unsigned level = ckks::getPolyType(rescale.getSrc()).getLevel();
+          scale = scaleChain.rescale(scale, level, level - type.getLevel());
         } else if (isa<ckks::AddCCOp, ckks::AddCPOp>(op)) {
           auto rhs = actualScale(op->getOperand(1));
           if (failed(rhs)) return failure();
@@ -994,6 +998,7 @@ private:
   bool profile;
   llvm::DenseMap<Value, uint64_t> ids;
   llvm::DenseMap<Value, double> actualScales;
+  hecate::ModulusChain scaleChain;
   std::map<uint64_t, Value> valuesById;
   std::vector<ckks::RuntimeInstruction> instructions;
 };

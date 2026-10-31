@@ -24,6 +24,7 @@ def Earth_Dialect : Dialect {
     static void setNativeScaleParameters(llvm::StringRef specPath,
                                          llvm::StringRef bootProfile);
     static std::vector<int64_t> nativeModuli;
+    static hecate::ModulusChain nativeScaleChain;
     static int64_t nativeOutputLevel;
     static int64_t nativeLevelAnchor;
     static int64_t nativeLowerLevel;
