@@ -26,11 +26,6 @@ void inferTypeForward(hecate::earth::ForwardMgmtInterface sop);
 int64_t bootstrapQBudget();
 int64_t bootstrapOutputLevel();
 bool usesNativeScalePlanning();
-bool usesTargetScalePlanning();
-mlir::LogicalResult prepareTargetBootSchedule(mlir::func::FuncOp func,
-                                            int64_t bootScale);
-mlir::LogicalResult planTargetScales(mlir::func::FuncOp func, int64_t waterline,
-                                   int64_t bootScale);
 struct ScaleState {
   int64_t level; // Q consumed from the compilation anchor; Boot resets this coordinate.
   double scale;  // Actual log2(scale), independent of the integer IR type.

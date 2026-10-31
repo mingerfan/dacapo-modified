@@ -34,11 +34,6 @@ struct ProactiveRescalingPass
 
     auto func = getOperation();
 
-    if (hecate::earth::usesTargetScalePlanning()) {
-      func.emitError("experimental target scale planning currently requires greedy placement");
-      return signalPassFailure();
-    }
-
     markAnalysesPreserved<hecate::ScaleManagementUnit>();
 
     mlir::OpBuilder builder(func);

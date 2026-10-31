@@ -190,12 +190,8 @@ double hecate::earth::actualScale(Value value) {
     return type.getScale();
   }
   auto *op = value.getDefiningOp();
-  // Coefficients can be cloned and retyped for a particular consumer.
-  if (isa<ConstantOp>(op)) {
-    if (auto encoding = op->getAttrOfType<FloatAttr>("earth.encoding_scale"))
-      return encoding.getValueAsDouble();
+  if (isa<ConstantOp>(op))
     return type.getScale();
-  }
   if (auto cached = op->getAttrOfType<FloatAttr>("earth.actual_scale"))
     return cached.getValueAsDouble();
   double scale;
@@ -217,8 +213,7 @@ double hecate::earth::actualScale(Value value) {
       scale -= std::log2(static_cast<double>(
           EarthDialect::nativeModuli.at(EarthDialect::nativeLevelAnchor - consumed)));
     } else if (auto upscale = dyn_cast<UpscaleOp>(op)) {
-      auto delta = op->getAttrOfType<FloatAttr>("earth.scale_delta");
-      scale += delta ? delta.getValueAsDouble() : upscale.getUpFactor();
+      scale += upscale.getUpFactor();
     }
   }
   op->setAttr("earth.actual_scale", FloatAttr::get(Float64Type::get(op->getContext()), scale));

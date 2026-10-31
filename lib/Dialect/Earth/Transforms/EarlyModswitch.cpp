@@ -46,7 +46,6 @@ struct EarlyModswitchPass
     auto &&bb = func.getBody().getBlocks().front();
     for (auto iter = bb.rbegin(); iter != bb.rend(); ++iter) {
       if (auto op = dyn_cast<hecate::earth::HEScaleOpInterface>(*iter)) {
-        if (hecate::earth::usesTargetScalePlanning() && op->hasAttr("sm_fixed")) continue;
         if (op->getResult(0).use_empty())
           continue;
 

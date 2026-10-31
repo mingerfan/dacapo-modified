@@ -23,31 +23,31 @@ def constantScale : NativeCodeCall<"$_builder.getI64IntegerAttr($0.getType().dyn
 // not decide whether a constant covers all slots of the eventual target.
 def hasManagedSlotCapacity : Constraint<CPred<"$0.getDefiningOp()->getParentOfType<::mlir::func::FuncOp>()->hasAttr(\"init_level\")">, "require parameter-managed function">;
 
-def ZeroUpscalePattern : Pat<(UpscaleOp:$out $arg, $val), (replaceWithValue $arg), [(isZero $val), (structureNotFixed $out)]>;
+def ZeroUpscalePattern : Pat<(UpscaleOp $arg, $val), (replaceWithValue $arg), [(isZero $val)]>;
 def ZeroModswitchPattern : Pat<(ModswitchOp $arg, $val), (replaceWithValue $arg), [(isZero $val)]>;
 def ZeroRotatePattern : Pat<(RotateOp $arg, $offset), (replaceWithValue $arg), [(isZeroRotateOffset $offset)]>;
 def AddZeroPattern : Pat<(AddOp (either $lhs, (ConstantOp $val, $dat2)) ), (replaceWithValue $lhs), [(isAllZero $val)]>;
 def MulZeroPattern : Pat<(MulOp (either $lhs, (ConstantOp:$res $val, $dat2)) ), (replaceWithValue $res), [(isAllZero $val)]>;
 // A full-slot unit still contributes its encoding scale to multiplication.
-def MulOnePattern : Pat<(MulOp:$product (either $lhs, (ConstantOp:$res $val, $dat2)) ), (UpscaleOp $lhs, (constantScale $res)), [(isAllOne $val), (hasManagedSlotCapacity $res), (structureNotFixed $product)]>;
-def NegMulPattern : Pat<(MulOp:$product (either $lhs, (ConstantOp:$res $val, $dat2)) ), (UpscaleOp (NegateOp $lhs), (constantScale $res)), [(isAllMinusOne $val), (hasManagedSlotCapacity $res), (structureNotFixed $product)]>;
+def MulOnePattern : Pat<(MulOp (either $lhs, (ConstantOp:$res $val, $dat2)) ), (UpscaleOp $lhs, (constantScale $res)), [(isAllOne $val), (hasManagedSlotCapacity $res)]>;
+def NegMulPattern : Pat<(MulOp (either $lhs, (ConstantOp:$res $val, $dat2)) ), (UpscaleOp (NegateOp $lhs), (constantScale $res)), [(isAllMinusOne $val), (hasManagedSlotCapacity $res)]>;
 
 
 // This patterns
 def addIntegerAttr : NativeCodeCall<"$_builder.getI64IntegerAttr($0.dyn_cast<IntegerAttr>().getInt() + $1.dyn_cast<IntegerAttr>().getInt())">;
-def UpscaleUpscalePattern : Pat<(UpscaleOp:$out (UpscaleOp:$res $arg, $val1), $val2), (UpscaleOp $arg, (addIntegerAttr $val1, $val2)), [(structureNotFixed $res), (structureNotFixed $out)]>;
+def UpscaleUpscalePattern : Pat<(UpscaleOp (UpscaleOp:$res $arg, $val1), $val2), (UpscaleOp $arg, (addIntegerAttr $val1, $val2)), [(structureNotFixed $res)]>;
 def ModswitchModswitchPattern : Pat<(ModswitchOp (ModswitchOp:$res $arg, $val1), $val2), (ModswitchOp $arg, (addIntegerAttr $val1, $val2)), [(structureNotFixed $res)]>;
 
 def changeConstScale : NativeCodeCall<"$_builder.create<::hecate::earth::ConstantOp>($_loc, $0.getType().dyn_cast<::hecate::earth::HEScaleTypeInterface>().switchScale($0.getType().dyn_cast<::hecate::earth::HEScaleTypeInterface>().getScale() + $1.dyn_cast<IntegerAttr>().getInt()), $2, $3)">;
-def UpscaleConstantPattern: Pat<(UpscaleOp:$out (ConstantOp:$res $dat1,$dat2), $up), (changeConstScale $res, $up, $dat1, $dat2), [(structureNotFixed $out)]>;
+def UpscaleConstantPattern: Pat<(UpscaleOp (ConstantOp:$res $dat1,$dat2), $up), (changeConstScale $res, $up, $dat1, $dat2)>;
 
 // Absorb scale normalization into the plaintext's encoding. This removes the
 // later multiplication by an encoded full-slot unit without changing payload,
 // output scale, or levels. A shared product must retain its original scale.
 def UpscaleMulConstantPattern : Pat<
-    (UpscaleOp:$out (MulOp:$product (either $lhs, (ConstantOp:$plain $payload, $rms))), $up),
+    (UpscaleOp (MulOp:$product (either $lhs, (ConstantOp:$plain $payload, $rms))), $up),
     (MulOp $lhs, (changeConstScale $plain, $up, $payload, $rms)),
-    [(singleUser $product), (structureNotFixed $product), (structureNotFixed $out)]>;
+    [(singleUser $product), (structureNotFixed $product)]>;
 
 def changeConstLevel : NativeCodeCall<"$_builder.create<::hecate::earth::ConstantOp>($_loc, $0.getType().dyn_cast<::hecate::earth::HEScaleTypeInterface>().switchLevel($0.getType().dyn_cast<::hecate::earth::HEScaleTypeInterface>().getLevel() + $1.dyn_cast<IntegerAttr>().getInt()), $2, $3)">;
 def ModswitchConstantPattern: Pat<(ModswitchOp (ConstantOp:$res $dat1,$dat2), $down), (changeConstLevel $res, $down, $dat1, $dat2)>;
@@ -56,7 +56,7 @@ def ModswitchConstantPattern: Pat<(ModswitchOp (ConstantOp:$res $dat1,$dat2), $d
 /* def RotateOffsetModuloPattern: Pat<(RotateOp $arg, $offset), (RotateOp $arg, (moduloSlot $offset))>; */
 
 
-def UpscaleRescalePattern: Pat<(UpscaleOp:$out (RescaleOp:$res $arg), $up), (RescaleOp (UpscaleOp $arg, $up)), [(singleUser $res), (structureNotFixed $out)]>;
+def UpscaleRescalePattern: Pat<(UpscaleOp (RescaleOp:$res $arg), $up), (RescaleOp (UpscaleOp $arg, $up)), [(singleUser $res)]>;
 
 def getScaleAfterRescale : NativeCodeCall<"$0.dyn_cast<IntegerAttr>().getInt() - hecate::earth::EarthDialect::rescalingFactor">;
 

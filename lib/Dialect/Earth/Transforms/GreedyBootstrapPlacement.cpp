@@ -58,28 +58,6 @@ struct GreedyBootstrapPlacementPass
       if (isOpTriviallyDead(&op))
         op.erase();
 
-    if (usesTargetScalePlanning()) {
-      if (depth_dp) {
-        func.emitError("experimental target scale planning does not use the "
-                       "old depth-DP simulator");
-        return signalPassFailure();
-      }
-      OpBuilder builder(func);
-      SmallVector<Type, 4> inputTypes;
-      if (failed(prepareTargetBootSchedule(func, bootScale)))
-        return signalPassFailure();
-      refineInputValues(func, builder, inputTypes, waterline, output_val);
-      if (failed(planTargetScales(func, waterline, bootScale)))
-        return signalPassFailure();
-      finishThresholdScale(func, builder, inputTypes);
-      unsigned bootCount = 0;
-      func.walk([&](BootstrapOp) { ++bootCount; });
-      llvm::outs() << "Target scale planning: greedy Boot insertion\nNumber "
-                      "of Bootstrapping: "
-                   << bootCount << '\n';
-      return;
-    }
-
     // Keep the original use counts: the management operations inserted below
     // must not extend the lifetime of a logical value in this scan.
     SmallVector<Operation *> operations;

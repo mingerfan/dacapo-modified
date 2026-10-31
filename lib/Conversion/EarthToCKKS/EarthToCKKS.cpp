@@ -140,11 +140,8 @@ LogicalResult
 ConstantOpLowering::matchAndRewrite(hecate::earth::ConstantOp op,
                                     OpAdaptor adaptor,
                                     ConversionPatternRewriter &rewriter) const {
-  auto scale = op->getAttrOfType<FloatAttr>("earth.encoding_scale");
-  auto encoded = rewriter.replaceOpWithNewOp<ckks::EncodeOp>(
+  rewriter.replaceOpWithNewOp<ckks::EncodeOp>(
       op, getTypeConverter()->convertType(op.getType()), adaptor.getValue());
-  if (scale)
-    encoded->setAttr("runtime.scale_log2",scale);
   return success();
 }
 
@@ -233,19 +230,6 @@ LogicalResult
 UpscaleOpLowering::matchAndRewrite(hecate::earth::UpscaleOp op,
                                    OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter) const {
-  if (auto delta = op->getAttrOfType<FloatAttr>("earth.scale_delta")) {
-    auto type = getTypeConverter()->convertType(op.getType()).cast<RankedTensorType>();
-    auto poly = type.getElementType().cast<ckks::PolyTypeInterface>();
-    auto plainType = RankedTensorType::get(type.getShape(),
-        poly.switchComponents(1).switchScaleLog2(op.getUpFactor()));
-    auto payloadType = RankedTensorType::get(
-        {earth::EarthDialect::polynomialDegree/2},rewriter.getF64Type());
-    auto one = DenseElementsAttr::get(payloadType,rewriter.getF64FloatAttr(1.));
-    auto encoded = rewriter.create<ckks::EncodeOp>(op.getLoc(),plainType,one);
-    encoded->setAttr("runtime.scale_log2",delta);
-    rewriter.replaceOpWithNewOp<ckks::MulCPOp>(op,type,adaptor.getValue(),encoded);
-    return success();
-  }
   rewriter.replaceOpWithNewOp<ckks::UpscaleCOp>(
       op, getTypeConverter()->convertType(op.getType()), adaptor.getValue(),
       adaptor.getUpFactor());

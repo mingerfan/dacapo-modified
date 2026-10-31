@@ -1,7 +1,6 @@
 
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Dialect/Earth/IR/HEParameterInterface.h"
-#include "hecate/Dialect/Earth/Transforms/Common.h"
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
@@ -23,9 +22,7 @@ struct RemoveBootstrapPass
   RemoveBootstrapPass() {}
 
   void runOnOperation() override {
-    // Target planning keeps user-specified refresh boundaries between regions.
-    if (hecate::earth::usesTargetScalePlanning())
-      return;
+
     auto func = getOperation();
     func.walk([&](hecate::earth::BootstrapOp bop) {
       bop.replaceAllUsesWith(bop.getOperand());
