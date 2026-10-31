@@ -70,7 +70,7 @@ public:
       : func(func), floor(floor), bootScale(bootScale),
         chain(EarthDialect::nativeScaleChain),
         anchor(EarthDialect::nativeLevelAnchor),
-        minimumQ(EarthDialect::nativeLowerLevel + 1) {}
+        minimumQ(EarthDialect::nativeArithmeticLowerLevel + 1) {}
 
   LogicalResult run(bool insertBoots) {
     if (failed(build()))

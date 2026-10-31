@@ -59,6 +59,7 @@ def replay(plan, graph, spec):
                 value = -value
         assert level == after['level'] and abs(scale - after['scale_log2']) < 1e-8
         if after['kind'] == 'ciphertext':
+            assert level >= spec['levels']['lower_bound']
             capacity = sum(math.log2(q) for q in spec['context']['rns_moduli'][:level+1])
             assert 40 - 1e-8 <= scale < capacity
         values[out] = value
@@ -80,7 +81,7 @@ def main():
     spec['context'].update(poly_degree=16, default_scale_log2=40,
                            rns_moduli=fixture['rns_moduli'],
                            rns_moduli_log2=[q.bit_length() for q in fixture['rns_moduli']])
-    spec['levels'].update(lower_bound=0, upper_bound=49)
+    spec['levels'].update(lower_bound=4, upper_bound=49)
     for entry in spec['operators'].values():
         entry.update(supported=True, latency_us_by_level=[10]*50)
     spec['boot_profiles'] = [dict(profile_id='regional40', implementation='native',
@@ -104,12 +105,16 @@ def main():
         value = g.op('mul', value, 'p')
     g.outputs = [value]
     rows.append(('terminal-linear', g, True))
+    g = definitions['Graph']()
+    g.outputs = [g.op('mul', g.op('rotate', 'x'), 'p')]
+    rows.append(('terminal-q5', g, 'q7'))
     with tempfile.TemporaryDirectory(prefix='regional-scale-') as directory:
         root = Path(directory)
         (root/'spec.json').write_text(json.dumps(spec))
         (root/'config.json').write_text(json.dumps(config))
         for name, graph, exhausted in rows:
-            exhausted = 25 if exhausted is True else 23 if exhausted == 'two-left' else 0
+            exhausted = (25 if exhausted is True else 23 if exhausted == 'two-left'
+                         else 24 if exhausted == 'q7' else 0)
             (root/'input.mlir').write_text(graph.source(exhausted).replace('tensor<1xf64>', 'tensor<8xf64>'))
             command = [str(args.hecate_opt.resolve()), str(root/'input.mlir'), '--dacapo',
                 '--native-scale-policy=regional', '--boot-placement=greedy',
@@ -124,10 +129,17 @@ def main():
                 '--runtime-plan-operator-spec-version=1',
                 '--runtime-plan-operator-spec-sha256=sha256:'+hashlib.sha256((root/'spec.json').read_bytes()).hexdigest(),
                 '-o', str(root/'result.mlir')]
+            if name == 'terminal-q5':
+                command.append('--regional-output-scale=40')
             result = subprocess.run(command, capture_output=True, text=True)
             assert result.returncode == 0, (name, result.stderr)
             plan = json.loads((root/'result.graph.runtime-plan.json').read_text())
             boots = replay(plan, graph, spec)
+            if name == 'terminal-q5':
+                assert boots == 0
+                desc = {v['id']: v for v in plan['values']}
+                output = desc[plan['final_outputs'][0]]
+                assert output['level'] == 4 and abs(output['scale_log2'] - 40) < 1e-8
             if name == 'terminal-linear':
                 assert boots == 0
                 result = subprocess.run(command + ['--regional-output-scale=40'], capture_output=True, text=True)

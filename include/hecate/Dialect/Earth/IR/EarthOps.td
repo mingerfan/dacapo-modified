@@ -28,6 +28,7 @@ def Earth_Dialect : Dialect {
     static int64_t nativeOutputLevel;
     static int64_t nativeLevelAnchor;
     static int64_t nativeLowerLevel;
+    static int64_t nativeArithmeticLowerLevel;
     static int64_t nativeBootInputLevel;
     static double nativeBootInputScale;
     static const std::map<std::string, llvm::SmallVector<int64_t>> &getLatencyTable();

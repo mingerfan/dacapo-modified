@@ -134,6 +134,7 @@ hecate::ModulusChain hecate::earth::EarthDialect::nativeScaleChain;
 int64_t hecate::earth::EarthDialect::nativeOutputLevel = -1;
 int64_t hecate::earth::EarthDialect::nativeLevelAnchor = -1;
 int64_t hecate::earth::EarthDialect::nativeLowerLevel = -1;
+int64_t hecate::earth::EarthDialect::nativeArithmeticLowerLevel = -1;
 int64_t hecate::earth::EarthDialect::nativeBootInputLevel = -1;
 double hecate::earth::EarthDialect::nativeBootInputScale = 0;
 
@@ -146,6 +147,7 @@ void hecate::earth::EarthDialect::setNativeScaleParameters(
   nativeModuli.clear();
   nativeScaleChain = {};
   nativeOutputLevel = nativeLowerLevel = nativeLevelAnchor = -1;
+  nativeArithmeticLowerLevel = -1;
   nativeBootInputLevel = -1;
   nativeBootInputScale = 0;
   if (nativeInputLevel < -1) fail("native input level must be nonnegative");
@@ -161,6 +163,7 @@ void hecate::earth::EarthDialect::setNativeScaleParameters(
   }
   nativeModuli = spec.at("context").at("rns_moduli").get<std::vector<int64_t>>();
   nativeLowerLevel = spec.at("levels").at("lower_bound").get<int64_t>();
+  nativeArithmeticLowerLevel = nativeLowerLevel;
   for (const auto &profile : spec.at("boot_profiles"))
     if (profile.at("profile_id") == bootProfile.str()) {
       if (nativeOutputLevel >= 0)
