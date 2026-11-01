@@ -61,9 +61,11 @@ struct GreedyBootstrapPlacementPass
 
     if (usesRegionalScalePlanning()) {
       if (depth_dp) {
-        func.emitError("regional scale planning currently requires --boot-placement=greedy");
+        func.emitError("regional scale planning does not support "
+                       "--boot-placement=depth-dp; use greedy or optimized");
         return signalPassFailure();
       }
+      preserveRegionalOutputs(func);
       OpBuilder builder(func);
       SmallVector<Type, 4> inputs;
       refineInputValues(func, builder, inputs, waterline, output_val);

@@ -277,6 +277,12 @@ void hecate::earth::EarthDialect::setCKKSParameters(llvm::StringRef filename) {
       config["bootstrapLevelUpperBound"];
   hecate::earth::EarthDialect::polynomialDegree = config["polynomialDegree"];
 
+  // Native physical levels can exceed the legacy logical level upper bound.
+  // Keep all explicitly supplied cost entries instead of truncating them.
+  size_t costLevels = levelUpperBound + 1;
+  for (const auto &entry : config["latencyTable"].items())
+    costLevels = std::max(costLevels, entry.value().size() + 1);
+
   for (auto &&name : names) {
     for (auto &&suffix : {"_single", "_double"}) {
       auto &latTab = latencyTable[name.str() + suffix];
@@ -289,7 +295,7 @@ void hecate::earth::EarthDialect::setCKKSParameters(llvm::StringRef filename) {
           latTab.push_back(data.get<int64_t>());
         }
       }
-      latTab.resize(levelUpperBound + 1, latTab.back());
+      latTab.resize(costLevels, latTab.back());
 
       if (config["noiseTable"].contains(name.str() + suffix) &&
           config["noiseTable"][name.str() + suffix].size()) {

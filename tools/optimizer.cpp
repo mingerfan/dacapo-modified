@@ -41,6 +41,7 @@
 #include "hecate/Dialect/Dist/IR/DistOps.h"
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
+#include "hecate/Support/CompilationProgress.h"
 
 using namespace llvm;
 
@@ -48,6 +49,24 @@ using namespace mlir;
 using namespace hecate;
 
 void registerHecatePipeline(cl::opt<std::string> &outputFilename);
+
+namespace {
+class StageProgress : public PassInstrumentation {
+  std::chrono::steady_clock::time_point start;
+  std::mutex mutex;
+  void report(StringRef stage, StringRef event) {
+    std::lock_guard<std::mutex> lock(mutex);
+    llvm::errs() << "[compile] " << stage << ' ' << event << " total_s="
+                 << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()
+                 << '\n';
+  }
+public:
+  explicit StageProgress(std::chrono::steady_clock::time_point start) : start(start) {}
+  void runBeforePass(Pass *pass, Operation *) override { report(pass->getName(), "begin"); }
+  void runAfterPass(Pass *pass, Operation *) override { report(pass->getName(), "end"); }
+  void runAfterPassFailed(Pass *pass, Operation *) override { report(pass->getName(), "failed"); }
+};
+} // namespace
 
 int main(int argc, char **argv) {
 
@@ -193,6 +212,17 @@ int main(int argc, char **argv) {
       .allowUnregisteredDialects(allowUnregisteredDialects)
       .emitBytecode(emitBytecode)
       .dumpPassPipeline(dumpPassPipeline);
+  const auto compilationStart = std::chrono::steady_clock::now();
+  if (hecate::compilationProgressEnabled()) {
+    llvm::errs() << "[compile] input-parser begin total_s=0\n";
+    config.setPassPipelineSetupFn([&](PassManager &pm) {
+      pm.addInstrumentation(std::make_unique<StageProgress>(compilationStart));
+      return passPipeline.addToPipeline(pm, [](const Twine &message) {
+        llvm::errs() << message << '\n';
+        return failure();
+      });
+    });
+  }
 
   if (failed(MlirOptMain(output->os(), std::move(file), registry, config))) {
     return asMainReturnCode(failure());
@@ -608,8 +638,6 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
   };
 
   auto addDaCapoPrecompile = [&, addPolynomialOptimization](OpPassManager &pm) {
-    if (earth::usesRegionalScalePlanning() && bootstrap_strategy == BootstrapStrategy::Optimized)
-      llvm::report_fatal_error("regional scale planning currently requires --boot-placement=greedy");
     earth::EarthDialect::setNativeScaleParameters(
         runtime_plan_physical_level_operator_spec_path, runtime_plan_boot_profile);
     std::string dir;
@@ -635,10 +663,12 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
           {waterline, output_val, bootstrap_scale}));
       pm.addNestedPass<func::FuncOp>(hecate::earth::createDaCapoPlanner(
           {waterline, output_val, bootstrap_scale}));
-      pm.addNestedPass<func::FuncOp>(
-          hecate::earth::createBootstrapPlacement({bootstrap_scale}));
-      pm.addNestedPass<func::FuncOp>(hecate::earth::createProactiveRescaling(
-          {waterline, output_val, bootstrap_scale}));
+      if (!earth::usesRegionalScalePlanning()) {
+        pm.addNestedPass<func::FuncOp>(
+            hecate::earth::createBootstrapPlacement({bootstrap_scale}));
+        pm.addNestedPass<func::FuncOp>(hecate::earth::createProactiveRescaling(
+            {waterline, output_val, bootstrap_scale}));
+      }
     }
     /* pm.addNestedPass<func::FuncOp>( */
     /*     hecate::earth::createSNRRescaling({waterline, output_val})); */

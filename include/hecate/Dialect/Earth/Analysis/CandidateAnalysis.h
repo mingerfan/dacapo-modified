@@ -9,6 +9,7 @@
 #include "mlir/Pass/AnalysisManager.h"
 #include "llvm/ADT/SmallSet.h"
 #include <set>
+#include <memory>
 
 namespace hecate {
 
@@ -77,6 +78,7 @@ void doLiveAnalysis(
   mlir::SmallVector<int64_t, 4> getCandidates() const;
   mlir::SmallVector<int64_t, 4> getEdges() const;
   mlir::SmallVector<int64_t, 4> getInitialTargets() const;
+  mlir::SmallVector<int64_t, 4> getActiveLiveOuts(int64_t opid) const;
   mlir::SmallVector<bool, 4> getBypassTypeOfLiveOuts(int64_t opid);
 
   size_t getMaxNumOuts() const;
@@ -89,6 +91,7 @@ void doLiveAnalysis(
   void setBypassEdges(int64_t from, int64_t OverThr);
   void sortValidCandidates(int64_t opid);
   void finalizeCandidates(int64_t setNum);
+  void restrictToRegionalBoundaries(llvm::ArrayRef<int64_t> boundaries);
   void pushFromCoverage(int64_t from, mlir::SmallVector<int64_t, 2> coverages);
   mlir::SmallVector<int64_t, 4> sortTargets(int64_t setNum);
   mlir::SmallVector<int64_t, 4>
@@ -96,6 +99,7 @@ void doLiveAnalysis(
   std::map<int64_t, mlir::SmallVector<int64_t, 4>> toFromMap;
 
 private:
+  bool regionalBoundaries = false;
   mlir::SmallVector<int64_t, 4> candidates;
   mlir::SmallVector<int64_t, 4> edges;
   llvm::DenseMap<size_t, mlir::SmallVector<int64_t, 4>> candidateSet;
@@ -104,9 +108,9 @@ private:
  mlir::DenseMap<int64_t, int64_t> idToIdMap;
   llvm::SmallVector<ValueInfo, 4> values;
   int64_t retOpid;
-  mlir::Liveness _l;
+  std::unique_ptr<mlir::Liveness> _l;
   mlir::Operation *_op;
-  ScaleManagementUnit smu;
+  std::unique_ptr<ScaleManagementUnit> smu;
 };
 } // namespace hecate
 

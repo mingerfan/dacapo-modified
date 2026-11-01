@@ -1,6 +1,7 @@
 #include "hecate/Dialect/Earth/Analysis/CandidateAnalysis.h"
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
+#include "hecate/Dialect/Earth/Transforms/RegionalScalePlanning.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/PassManager.h"
@@ -26,13 +27,28 @@ struct CandidateSelectionPass
     auto &ca = getAnalysis<hecate::CandidateAnalysis>();
     for (auto cut : ca.getEdges()) {
       SmallVector<int64_t, 4> targets;
-      for (auto id : ca.getValueInfo(cut)->getLiveOuts())
+      for (auto id : ca.getValueInfo(cut)->getLiveOuts()) {
+        if (hecate::earth::usesRegionalScalePlanning() &&
+            llvm::all_of(ca.getValueInfo(id)->getValue().getUsers(),
+                         [](Operation *user) { return isa<func::ReturnOp>(user); }))
+          continue;
         if (!ca.getValueInfo(id)->isBypassEdge(cut))
           targets.push_back(id);
+      }
       ca.getValueInfo(cut)->setValidLiveOuts(targets);
       ca.sortValidCandidates(cut);
     }
     OpBuilder builder(func);
+    if (hecate::earth::usesRegionalScalePlanning()) {
+      // Regional scale constraints make "Boot at every cut" non-monotonic:
+      // that trial may fail even when a subset of these cuts is feasible.
+      // The regional grid is already small. Let the DP check its real edges
+      // instead of rejecting the grid using an artificial full-Boot schedule.
+      func->setAttr("selected_set", builder.getI64IntegerAttr(1));
+      ca.finalizeCandidates(1);
+      markAnalysesPreserved<hecate::CandidateAnalysis>();
+      return;
+    }
     OwningOpRef<ModuleOp> module = ModuleOp::create(func.getLoc());
     PassManager pm(func.getContext());
     pm.addNestedPass<func::FuncOp>(

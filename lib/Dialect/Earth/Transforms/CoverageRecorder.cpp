@@ -7,6 +7,7 @@
 
 #include "hecate/Dialect/Earth/Analysis/CandidateAnalysis.h"
 #include "hecate/Dialect/Earth/Transforms/Common.h"
+#include "hecate/Dialect/Earth/Transforms/RegionalScalePlanning.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 #include <random>
@@ -72,6 +73,16 @@ struct CoverageRecorderPass
     const int64_t bootScale =
         bootstrap_scale ? bootstrap_scale.getValue()
                         : hecate::earth::EarthDialect::rescalingFactor;
+    if (hecate::earth::usesRegionalScalePlanning()) {
+      auto limit = hecate::earth::analyzeRegionalScaleCoverage(dup, waterline,
+                                                               bootScale);
+      dup.erase();
+      if (failed(limit))
+        return signalPassFailure();
+      func->setAttr("coverages",
+                    builder.getDenseI64ArrayAttr({*limit, *limit}));
+      return;
+    }
     for (auto sop : original) {
       auto opid = hecate::getIntegerAttr("opid", sop->getResult(0));
       if (!isa<hecate::earth::BootstrapOp>(sop) &&

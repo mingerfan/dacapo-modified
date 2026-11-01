@@ -3,17 +3,25 @@
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Support/Support.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "hecate/Dialect/Earth/Transforms/Common.h"
+#include "hecate/Support/CompilationProgress.h"
 
 using namespace hecate;
 
 hecate::CandidateAnalysis::CandidateAnalysis(mlir::Operation *op)
-    : _l(op), _op(op), smu(op) {
+    : _op(op) {
+  CompilationProgress progress("candidate-analysis");
+  if (!earth::usesRegionalScalePlanning()) {
+    _l = std::make_unique<mlir::Liveness>(op);
+    smu = std::make_unique<ScaleManagementUnit>(op);
+  }
   build();
 }
 
 void hecate::CandidateAnalysis::build() {
   llvm::SmallVector<int64_t, 4> liveIn, liveOut;
-  smu.attach();
+  if (smu)
+    smu->attach();
   values.emplace_back(0, nullptr);
   edges.push_back(0);
   for (auto argument : mlir::cast<mlir::func::FuncOp>(_op).getArguments()) {
@@ -27,6 +35,28 @@ void hecate::CandidateAnalysis::build() {
   values.front().setLiveOuts(liveOut);
   auto &&func = dyn_cast<mlir::func::FuncOp>(_op);
   auto &&bb = func.getBody().getBlocks().front();
+  if (earth::usesRegionalScalePlanning()) {
+    // Regional cuts already define the analysis units. Do not construct the
+    // unrelated SMU fixed point or retain live vectors at every raw operation.
+    for (auto &op : bb)
+      for (auto value : op.getResults()) {
+        auto id = static_cast<int64_t>(values.size());
+        hecate::setIntegerAttr("opid", value, id);
+        values.emplace_back(id, value);
+      }
+    retOpid = values.size();
+    values.emplace_back(retOpid, nullptr);
+    for (auto &op : bb) {
+      auto user = op.getNumResults()
+                      ? hecate::getIntegerAttr("opid", op.getResult(0))
+                      : retOpid;
+      for (auto input : op.getOperands())
+        if (earth::getScaleType(input).isCipher())
+          values[hecate::getIntegerAttr("opid", input)].setDeadOpid(user);
+    }
+    toFromMap[0] = {};
+    return;
+  }
   for (auto iter = bb.begin(); iter != bb.end(); ++iter) {
     mlir::Operation *op = &*iter;
     if ((llvm::isa<hecate::earth::UpscaleOp>(op) ||
@@ -63,7 +93,7 @@ void hecate::CandidateAnalysis::doLiveAnalysis(
       for (auto &&oper : sop->getOperands()) {
         if (!hecate::earth::getScaleType(oper).isCipher())
           continue;
-        if (_l.isDeadAfter(oper, sop)) {
+        if (_l->isDeadAfter(oper, sop)) {
           auto operID = hecate::getIntegerAttr("opid", oper);
           auto dead = std::find(liveOut.begin(), liveOut.end(), operID);
           if (dead != liveOut.end()) {
@@ -77,7 +107,7 @@ void hecate::CandidateAnalysis::doLiveAnalysis(
         auto &&v = hecate::getIntegerAttr("opid", val);
         liveOut.push_back(v);
         for (auto &&user : val.getUsers()) {
-          if (smu.getID(user) != smu.getID(sop)) {
+          if (smu->getID(user) != smu->getID(sop)) {
             values[v].setLiveOuts(liveOut);
             values[v].setLiveIns(liveIn);
             edges.push_back(v);
@@ -103,7 +133,7 @@ hecate::CandidateAnalysis::getInitialTargets() const {
   return targets;
 }
 
-ScaleManagementUnit hecate::CandidateAnalysis::getSMU() const { return smu; };
+ScaleManagementUnit hecate::CandidateAnalysis::getSMU() const { return *smu; };
 size_t hecate::CandidateAnalysis::getMaxNumOuts() const {
   size_t ret = 0;
   for (auto a : candidateSet) {
@@ -137,9 +167,23 @@ hecate::CandidateAnalysis::getTargets(int64_t opid) const {
     return values[opid].getValidLiveOuts();
 }
 mlir::SmallVector<int64_t, 4>
+hecate::CandidateAnalysis::getActiveLiveOuts(int64_t opid) const {
+  auto active = values[opid].getLiveOuts();
+  if (regionalBoundaries)
+    llvm::erase_if(active, [&](int64_t id) {
+      return llvm::all_of(values[id].getValue().getUsers(), [](mlir::Operation *user) {
+        return mlir::isa<mlir::func::ReturnOp>(user);
+      });
+    });
+  return active;
+}
+
+mlir::SmallVector<int64_t, 4>
 hecate::CandidateAnalysis::getTargets(int64_t opid, int64_t setNum) const {
   if (opid == 0 || opid == retOpid)
     return {};
+  if (regionalBoundaries)
+    return values[opid].getValidLiveOuts();
   /* if (values[opid].getValidLiveOuts().size() == setNum) */
   /*   return values[opid].getValidLiveOuts(); */
   /* else */
@@ -191,9 +235,9 @@ ValueInfo *hecate::CandidateAnalysis::getValueInfo(int64_t opid) {
 void hecate::CandidateAnalysis::sortValidCandidates(int64_t opid) {
   auto v = values[opid];
   candidateSet[v.getValidLiveOuts().size()].push_back(opid);
-  if (v.getLiveOuts().size() != v.getValidLiveOuts().size()) {
-    candidateSet[v.getLiveOuts().size()].push_back(opid);
-  }
+  const auto active = getActiveLiveOuts(opid);
+  if (active.size() != v.getValidLiveOuts().size())
+    candidateSet[active.size()].push_back(opid);
   return;
 }
 mlir::SmallVector<int64_t, 4>
@@ -232,6 +276,8 @@ hecate::CandidateAnalysis::sortTargets(int64_t setNum,
 }
 
 void hecate::CandidateAnalysis::finalizeCandidates(int64_t setNum) {
+  candidates.clear();
+  toFromMap.clear();
   candidates.push_back(0);
   for (int i = 1; i <= setNum; i++) {
     candidates.append(getCandidateSet(i));
@@ -241,6 +287,38 @@ void hecate::CandidateAnalysis::finalizeCandidates(int64_t setNum) {
   candidates.erase(std::unique(candidates.begin(), candidates.end()),
                    candidates.end());
   return;
+}
+
+void hecate::CandidateAnalysis::restrictToRegionalBoundaries(
+    llvm::ArrayRef<int64_t> boundaries) {
+  regionalBoundaries = true;
+  std::set<int64_t> allowed(boundaries.begin(), boundaries.end());
+  edges.assign(1, 0);
+  auto live = values.front().getLiveOuts();
+  for (auto &op : cast<mlir::func::FuncOp>(_op).front()) {
+    auto scaleOp = dyn_cast<earth::HEScaleOpInterface>(op);
+    if (!scaleOp || !scaleOp.isCipher())
+      continue;
+    auto cut = hecate::getIntegerAttr("opid", op.getResult(0));
+    for (auto input : op.getOperands())
+      if (earth::getScaleType(input).isCipher()) {
+        auto id = hecate::getIntegerAttr("opid", input);
+        if (values[id].getDeadOpid() == cut)
+          llvm::erase_value(live, id);
+      }
+    live.push_back(cut);
+    // Include every public regional boundary, not just old SMU edges. In
+    // particular, a region's output may feed rotations in the same SMU.
+    bool savesOutput = llvm::any_of(op.getResult(0).getUsers(), [](mlir::Operation *user) {
+      return user->hasAttr("earth.saved_output");
+    });
+    if (!savesOutput && allowed.count(cut) && llvm::all_of(live, [&](int64_t value) {
+          return allowed.count(value);
+        })) {
+      values[cut].setLiveOuts(live);
+      edges.push_back(cut);
+    }
+  }
 }
 
 void hecate::CandidateAnalysis::pushFromCoverage(

@@ -51,10 +51,14 @@ struct ProactiveRescalingPass
       func.emitError("invalid threshold scale policy or Boot Q budget");
       return signalPassFailure();
     }
+    const auto inputBudget =
+        hecate::earth::usesRegionalScalePlanning()
+            ? hecate::earth::EarthDialect::nativeLevelAnchor -
+                  hecate::earth::EarthDialect::nativeArithmeticLowerLevel
+            : hecate::earth::bootstrapQBudget();
     for (Value input : func.getArguments())
       if (hecate::earth::getScaleType(input).isCipher() &&
-          hecate::earth::getScaleType(input).getLevel() >
-              hecate::earth::bootstrapQBudget()) {
+          hecate::earth::getScaleType(input).getLevel() > inputBudget) {
         func.emitError("input ciphertext exceeds the Boot Q budget");
         return signalPassFailure();
       }

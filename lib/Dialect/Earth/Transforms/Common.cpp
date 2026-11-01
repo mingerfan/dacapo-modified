@@ -2,10 +2,17 @@
 #include "hecate/Dialect/Earth/IR/EarthOps.h"
 #include "hecate/Support/Support.h"
 #include "hecate/Support/BootstrapInputAlignment.h"
+#include "hecate/Support/CompilationProgress.h"
+#include "llvm/Support/CommandLine.h"
 #include "mlir/IR/Value.h"
 #include <cmath>
 
 using namespace mlir;
+
+static llvm::cl::opt<bool> compilationProgress(
+    "compilation-progress", llvm::cl::desc("Report compilation stages and search progress"),
+    llvm::cl::init(false));
+bool hecate::compilationProgressEnabled() { return compilationProgress; }
 
 int64_t hecate::earth::bootstrapQBudget() {
   if (usesNativeScalePlanning())

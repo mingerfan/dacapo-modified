@@ -1,7 +1,9 @@
 #include "hecate/Dialect/Earth/Analysis/CandidateAnalysis.h"
 #include "hecate/Dialect/Earth/Transforms/Common.h"
 #include "hecate/Dialect/Earth/Transforms/Passes.h"
+#include "hecate/Dialect/Earth/Transforms/RegionalScalePlanning.h"
 #include "hecate/Support/Support.h"
+#include "hecate/Support/CompilationProgress.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/PassManager.h"
@@ -23,6 +25,7 @@ struct BypassDetectionPass
     bootstrap_scale = options.bootstrap_scale;
   }
   void runOnOperation() override {
+    hecate::CompilationProgress progress("bypass-analysis");
     auto func = getOperation();
     if (func.isExternal())
       return;
@@ -56,13 +59,68 @@ struct BypassDetectionPass
         op.emitError("unsupported operation in DaCapo Boot analysis");
         return signalPassFailure();
       }
+    if (hecate::earth::usesRegionalScalePlanning())
+      hecate::earth::preserveRegionalOutputs(func);
+    if (hecate::earth::usesRegionalScalePlanning() &&
+        failed(hecate::earth::scheduleRegionalRegions(func)))
+      return signalPassFailure();
     auto &ca = getAnalysis<hecate::CandidateAnalysis>();
+    if (hecate::earth::usesRegionalScalePlanning()) {
+      auto boundaries = hecate::earth::regionalScaleBoundaries(func);
+      if (failed(boundaries))
+        return signalPassFailure();
+      ca.restrictToRegionalBoundaries(*boundaries);
+      llvm::errs() << "Regional DaCapo indexed values: " << ca.getNumValues()
+                   << ", boundaries: " << ca.getNumEdges() << '\n';
+      hecate::earth::RegionalScaleAnalysis analysis(func, waterline, scale);
+      if (hecate::compilationProgressEnabled()) {
+        SmallVector<hecate::earth::RegionalScaleState> initial;
+        for (Value arg : func.getArguments())
+          initial.push_back({arg, static_cast<unsigned>(
+              hecate::earth::EarthDialect::nativeLevelAnchor + 1 -
+              hecate::earth::getScaleType(arg).getLevel()), static_cast<double>(waterline)});
+        auto limit = analysis.coverage(0, initial);
+        if (failed(limit))
+          return signalPassFailure();
+        const auto edges = ca.getEdges();
+        llvm::errs() << "[compile] regional-initial-coverage limit=" << *limit
+                     << " first_cut=" << (edges.size() > 1 ? edges[1] : -1)
+                     << " inputs=" << initial.size() << '\n';
+      }
+      const unsigned q = hecate::earth::EarthDialect::nativeOutputLevel + 1;
+      const unsigned minimumQ = hecate::earth::EarthDialect::nativeLevelAnchor + 1 -
+          static_cast<int64_t>(hecate::earth::bootstrapQBudget() * threshold);
+      unsigned completed = 0;
+      for (auto from : ca.getEdges()) {
+        SmallVector<hecate::earth::RegionalScaleState> inputs;
+        for (Value arg : func.getArguments())
+          inputs.push_back({arg, q, static_cast<double>(scale)});
+        if (from)
+          for (auto id : ca.getValueInfo(from)->getLiveOuts())
+            inputs.push_back({ca.getValueInfo(id)->getValue(), q,
+                              static_cast<double>(scale)});
+        auto limit = analysis.coverage(from, inputs, minimumQ);
+        if (failed(limit))
+          return signalPassFailure();
+        if (*limit >= 0) {
+          ca.getValueInfo(from)->setThresholdOpid(*limit);
+          if (!from)
+            for (auto input : ca.getValueInfo(0)->getLiveOuts())
+              ca.getValueInfo(input)->setThresholdOpid(*limit);
+        }
+        progress.update(++completed, ca.getNumEdges());
+      }
+      markAnalysesPreserved<hecate::CandidateAnalysis>();
+      return;
+    }
     std::atomic<bool> failedAny{false};
     std::vector<std::thread> threads;
     auto maxThreads = func.getContext()->isMultithreadingEnabled()
                           ? std::max(1u, std::thread::hardware_concurrency())
                           : 1u;
+    unsigned completed = 0;
     for (auto from : ca.getEdges()) {
+      progress.update(completed++, ca.getNumEdges());
       threads.emplace_back([&, from] {
         if (failed(findBypassEdge(func, ca, from)))
           failedAny = true;
@@ -82,8 +140,47 @@ struct BypassDetectionPass
   LogicalResult findBypassEdge(func::FuncOp func, hecate::CandidateAnalysis &ca,
                                int64_t from) {
     OwningOpRef<ModuleOp> module = ModuleOp::create(func.getLoc());
+    OpBuilder builder(func);
+    if (hecate::earth::usesRegionalScalePlanning()) {
+      // Probe the suffix from a refreshed frontier. The prefix has no known
+      // states here and must not be evaluated with threshold scale rules.
+      SmallVector<Value> inputs;
+      if (from)
+        for (auto id : ca.getValueInfo(from)->getLiveOuts())
+          inputs.push_back(ca.getValueInfo(id)->getValue());
+      auto copy = hecate::earth::cloneRegionalSegment(
+          func, inputs, func.front().getTerminator()->getOperands(), {}, from,
+          bootstrap_scale, false);
+      if (!copy)
+        return failure();
+      module->push_back(copy);
+      const int64_t scale = bootstrap_scale
+                                ? bootstrap_scale.getValue()
+                                : hecate::earth::EarthDialect::rescalingFactor;
+      for (auto arg : copy.getArguments())
+        arg.setType(hecate::earth::getScaleType(arg)
+                        .switchLevel(hecate::earth::bootstrapOutputLevel())
+                        .switchScale(scale));
+      copy->setAttr("earth.arg_scales",
+                    builder.getDenseF64ArrayAttr(
+                        SmallVector<double>(copy.getNumArguments(), scale)));
+      hecate::earth::clearActualScales(copy);
+      auto minimumQ =
+          hecate::earth::EarthDialect::nativeLevelAnchor + 1 -
+          static_cast<int64_t>(hecate::earth::bootstrapQBudget() * threshold);
+      auto limit = hecate::earth::analyzeRegionalScaleCoverage(copy, waterline,
+                                                               scale, minimumQ);
+      if (failed(limit))
+        return failure();
+      if (*limit >= 0) {
+        ca.getValueInfo(from)->setThresholdOpid(*limit);
+        if (!from)
+          for (auto input : ca.getValueInfo(0)->getLiveOuts())
+            ca.getValueInfo(input)->setThresholdOpid(*limit);
+      }
+      return success();
+    }
     auto copy = func.clone();
-    OpBuilder builder(copy);
     copy->setAttr("btp_at", builder.getI64IntegerAttr(from));
     copy->setAttr("btp_target", builder.getDenseI64ArrayAttr(
                                     ca.getValueInfo(from)->getLiveOuts()));
