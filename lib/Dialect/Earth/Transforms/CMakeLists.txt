@@ -7,6 +7,8 @@ add_mlir_dialect_library(EarthTransforms
  CodeSegmentation.cpp
  Common.cpp
  RegionalScalePlanning.cpp
+ ScaleAlignmentPlanning.cpp
+ HoistScaleAlignment.cpp
  OptimizePolynomialArithmetic.cpp
  UpscaleBubbling.cpp
  EarlyModswitch.cpp

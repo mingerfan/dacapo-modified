@@ -672,6 +672,13 @@ void registerHecatePipeline(cl::opt<std::string> &outputFilename) {
     }
     /* pm.addNestedPass<func::FuncOp>( */
     /*     hecate::earth::createSNRRescaling({waterline, output_val})); */
+    if (earth::usesScaleAlignmentHoisting()) {
+      hecate::earth::HoistScaleAlignmentOptions alignment;
+      alignment.operatorSpecPath = runtime_plan_physical_level_operator_spec_path;
+      alignment.bootProfile = runtime_plan_boot_profile;
+      alignment.waterline = waterline;
+      pm.addNestedPass<func::FuncOp>(hecate::earth::createHoistScaleAlignment(alignment));
+    }
     pm.addNestedPass<func::FuncOp>(hecate::earth::createEarlyModswitch());
     pm.addNestedPass<func::FuncOp>(hecate::earth::createAbsorbCoefficientScale({waterline}));
     pm.addPass(mlir::createCanonicalizerPass());

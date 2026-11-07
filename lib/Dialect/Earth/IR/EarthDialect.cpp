@@ -17,6 +17,10 @@
 using namespace mlir;
 
 namespace {
+llvm::cl::opt<bool> alignmentHoisting(
+    "enable-scale-alignment-hoisting",
+    llvm::cl::desc("Use fixed-budget scale alignment planning and its independent pass"),
+    llvm::cl::init(false));
 llvm::cl::opt<std::string> scalePolicy(
     "native-scale-policy", llvm::cl::desc("Native scale policy: threshold or regional"),
     llvm::cl::init("threshold"));
@@ -31,6 +35,7 @@ bool hecate::earth::usesRegionalScalePlanning() {
     llvm::report_fatal_error("native-scale-policy must be threshold or regional");
   return scalePolicy == "regional";
 }
+bool hecate::earth::usesScaleAlignmentHoisting() { return alignmentHoisting; }
 
 #define GET_TYPEDEF_CLASSES
 #include "hecate/Dialect/Earth/IR/EarthOpsTypes.cpp.inc"
@@ -444,7 +449,9 @@ void hecate::earth::AddOp::getCanonicalizationPatterns(
   auto lTensor = earth::getTensorType(op.getLhs());
   auto rScale = earth::getScaleType(op.getRhs());
   auto rTensor = earth::getTensorType(op.getRhs());
-  if (usesRegionalScalePlanning() && lScale.isCipher() && rScale.isCipher() &&
+  auto function = op.getLhs().getParentRegion()->getParentOfType<func::FuncOp>();
+  bool aligned = function && function->hasAttr("earth.scale_alignment_policy");
+  if ((usesRegionalScalePlanning() || aligned) && lScale.isCipher() && rScale.isCipher() &&
       lScale.getLevel() == rScale.getLevel() && lTensor.getShape() == rTensor.getShape() &&
       std::abs(actualScale(op.getLhs()) - actualScale(op.getRhs())) <= 1e-8) {
     inferredReturnTypes.push_back(lScale.switchScale(std::max(lScale.getScale(), rScale.getScale())));

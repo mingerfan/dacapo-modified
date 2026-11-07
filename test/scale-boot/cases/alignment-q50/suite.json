@@ -1,0 +1,8 @@
+{
+  "format_version": 1,
+  "cases": [
+    "absorb-mulcp",
+    "reuse-modswitch",
+    "insufficient-budget"
+  ]
+}

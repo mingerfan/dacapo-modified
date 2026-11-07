@@ -66,6 +66,17 @@ def EarlyModswitch: Pass<"early-modswitch", "::mlir::func::FuncOp"> {
     This pass implements the early modswitch of EVA.
   }];
 }
+def HoistScaleAlignment : Pass<"hoist-scale-alignment", "::mlir::func::FuncOp"> {
+  let summary = "Repair native scale alignment within fixed physical-level boundaries";
+  let options = [
+    Option<"operatorSpecPath", "operator-spec-path", "std::string", [{""}], "Native OperatorSpec JSON">,
+    Option<"bootProfile", "boot-profile", "std::string", [{""}], "Selected Boot profile">,
+    Option<"waterline", "waterline", "double", "40", "Ciphertext and ordinary plaintext scale floor">,
+    Option<"unitError", "unit-error", "double", "1e-6", "Maximum local full-slot unit encoding error">,
+    Option<"maxGraphQueries", "max-graph-queries", "unsigned", "1024", "Maximum distinct value/scale requests per repair">,
+    Option<"maxGraphDepth", "max-graph-depth", "unsigned", "128", "Maximum graph backtracking depth">
+  ];
+}
 def UpscaleBubbling : Pass<"upscale-bubbling", "::mlir::func::FuncOp"> {
   let summary = "Apply Upscale Bubbling";
   let description = [{

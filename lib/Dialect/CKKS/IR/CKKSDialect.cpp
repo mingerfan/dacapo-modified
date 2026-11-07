@@ -197,7 +197,8 @@ void hecate::ckks::CKKSDialect::initialize() {
   auto func = (*this)->getParentOfType<func::FuncOp>();
   if (lhs.getComponents() != rhs.getComponents() || result.getComponents() != lhs.getComponents() ||
       lhs.getLevel() != rhs.getLevel() || result.getLevel() != lhs.getLevel() ||
-      ((!func || !func->hasAttr("earth.region_scale_policy")) &&
+      ((!func || (!func->hasAttr("earth.region_scale_policy") &&
+                  !func->hasAttr("earth.scale_alignment_policy"))) &&
        (getLhs().getType() != getRhs().getType() || getResult().getType() != getLhs().getType())))
     return emitOpError("requires matching ciphertext levels, components and scales");
   if (ckks::getPolyType(getLhs()).getComponents() < 2)

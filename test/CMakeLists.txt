@@ -1,7 +1,39 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+add_test(NAME DacapoScaleBootVerifier
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check.py)
+add_test(NAME DacapoScaleAlignmentVerifier
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check-alignment.py)
+add_test(NAME DacapoScaleBootCompiler
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check-compiler.py
+          --hecate-opt $<TARGET_FILE:hecate-opt>)
+
 add_executable(DacapoModulusChainTest Support/ModulusChainTest.cpp)
 add_test(NAME DacapoModulusChain COMMAND DacapoModulusChainTest)
+add_executable(DacapoScaleAlignmentDriver Support/ScaleAlignmentDriver.cpp
+  ../lib/Dialect/Earth/Transforms/ScaleAlignmentPlanning.cpp)
+# Only the JSON test adapter uses exceptions; the production core does not.
+target_compile_options(DacapoScaleAlignmentDriver PRIVATE -fexceptions)
+add_test(NAME DacapoScaleAlignmentPlanner
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check-alignment-planner.py
+          --driver $<TARGET_FILE:DacapoScaleAlignmentDriver>)
+add_test(NAME DacapoHoistScaleAlignment
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-hoist-scale-alignment.py
+          --hecate-opt $<TARGET_FILE:hecate-opt> --source-dir ${PROJECT_SOURCE_DIR})
+add_test(NAME DacapoGraphScaleAlignment
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-graph-scale-alignment.py
+          --hecate-opt $<TARGET_FILE:hecate-opt> --source-dir ${PROJECT_SOURCE_DIR})
+add_test(NAME DacapoRegionalHoistScaleAlignment
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-regional-scale.py
+          --hecate-opt $<TARGET_FILE:hecate-opt> --source-dir ${PROJECT_SOURCE_DIR}
+          --enable-scale-alignment-hoisting)
+add_test(NAME DacapoOptimizedHoistScaleAlignment
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-regional-scale.py
+          --hecate-opt $<TARGET_FILE:hecate-opt> --source-dir ${PROJECT_SOURCE_DIR}
+          --enable-scale-alignment-hoisting --boot-placement optimized)
 add_test(NAME DacapoRegionalScale
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/runtime-plan/check-regional-scale.py

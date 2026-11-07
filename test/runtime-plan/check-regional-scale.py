@@ -78,6 +78,7 @@ def main():
     parser.add_argument('--source-dir', type=Path, required=True)
     parser.add_argument('--boot-placement', choices=('greedy', 'optimized'), default='greedy')
     parser.add_argument('--all-candidates', action='store_true')
+    parser.add_argument('--enable-scale-alignment-hoisting', action='store_true')
     parser.add_argument('--beam-width', type=int, default=32)
     args = parser.parse_args()
     source = args.source_dir.resolve()
@@ -246,6 +247,8 @@ def main():
                 command.append('--regional-output-scale=40')
             if args.all_candidates:
                 command.append('--regional-all-boot-candidates')
+            if args.enable_scale_alignment_hoisting:
+                command.append('--enable-scale-alignment-hoisting')
             result = subprocess.run(command, capture_output=True, text=True)
             assert result.returncode == 0, (name, result.stderr)
             plan = json.loads((root/'result.graph.runtime-plan.json').read_text())

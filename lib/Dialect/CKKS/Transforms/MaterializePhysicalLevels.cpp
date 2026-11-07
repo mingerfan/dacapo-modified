@@ -255,6 +255,8 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
   hecate::ModulusChain chain;
   chain.reset(spec.moduli);
   llvm::DenseMap<Value, double> scales;
+  const double plannedTolerance = func->hasAttr("earth.scale_alignment_policy") ? 1e-8
+      : func->hasAttr("earth.region_scale_policy") ? 1e-10 : 0;
   auto arguments = func->getAttrOfType<DenseF64ArrayAttr>("earth.arg_scales");
   for (auto [i, arg] : llvm::enumerate(func.getArguments()))
     scales[arg] = arguments ? arguments.asArrayRef()[i] : ckks::getPolyType(arg).getScaleLog2();
@@ -345,8 +347,7 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
       auto target = ckks::getPolyType(rescale.getResult());
       scale = chain.rescale(scale, source.getLevel(), source.getLevel() - target.getLevel());
       if (auto floor = func->getAttrOfType<FloatAttr>("earth.scale_waterline");
-          floor && scale < floor.getValueAsDouble() -
-              (func->hasAttr("earth.region_scale_policy") ? 1e-10 : 0))
+          floor && scale < floor.getValueAsDouble() - plannedTolerance)
         return op->emitError("native Rescale violates the planned scale waterline");
     } else if (auto add = dyn_cast<ckks::AddCPOp>(op)) {
       auto encode = add.getRhs().getDefiningOp<ckks::EncodeOp>();
@@ -358,9 +359,9 @@ LogicalResult materializeActualScales(func::FuncOp func, const PhysicalLevelSpec
       if (encode->use_empty()) encode.erase();
     } else if (auto add = dyn_cast<ckks::AddCCOp>(op)) {
       double rhs = scales.lookup(add.getRhs());
-      if (std::abs(scale - rhs) > 1e-10) {
-        if (func->hasAttr("earth.region_scale_policy"))
-          return op->emitError("regional Add operands disagree in actual scale; refusing an unplanned unit multiplication");
+      if (std::abs(scale - rhs) > std::max(1e-10, plannedTolerance)) {
+        if (func->hasAttr("earth.region_scale_policy") || func->hasAttr("earth.scale_alignment_policy"))
+          return op->emitError("planned Add operands disagree in actual scale; refusing an unplanned unit multiplication");
         unsigned lower = scale < rhs ? 0 : 1;
         Value input = op->getOperand(lower);
         double target = std::max(scale, rhs);

@@ -1,0 +1,200 @@
+{
+  "format_version": 5,
+  "plan_id": "1",
+  "target": {
+    "target_id": "poseidon-ckks-gpu",
+    "capability_version": 1,
+    "operator_spec": {
+      "id": "poseidon-resnet20-manual-q50",
+      "version": 1,
+      "source_sha256": "sha256:2459ba778e7105b827c4125fedcc5a417445910ccf5ad93985364ab7b6136cf3"
+    },
+    "world_size": 1,
+    "device_counts": [
+      0
+    ]
+  },
+  "values": [
+    {
+      "id": "0",
+      "kind": "ciphertext",
+      "level": 5,
+      "scale_log2": 40.0,
+      "components": 2,
+      "ntt": true,
+      "place": {
+        "kind": "host",
+        "rank": 0
+      },
+      "context": "poseidon-resnet20-manual-q50"
+    },
+    {
+      "id": "1",
+      "kind": "ciphertext",
+      "level": 5,
+      "scale_log2": 40.2,
+      "components": 2,
+      "ntt": true,
+      "place": {
+        "kind": "host",
+        "rank": 0
+      },
+      "context": "poseidon-resnet20-manual-q50"
+    },
+    {
+      "id": "2",
+      "kind": "plaintext",
+      "level": 5,
+      "scale_log2": 32.18970493361911,
+      "components": 1,
+      "ntt": true,
+      "place": {
+        "kind": "host",
+        "rank": 0
+      },
+      "context": "poseidon-resnet20-manual-q50"
+    },
+    {
+      "id": "3",
+      "kind": "ciphertext",
+      "level": 5,
+      "scale_log2": 72.18970493361911,
+      "components": 2,
+      "ntt": true,
+      "place": {
+        "kind": "host",
+        "rank": 0
+      },
+      "context": "poseidon-resnet20-manual-q50"
+    },
+    {
+      "id": "4",
+      "kind": "ciphertext",
+      "level": 4,
+      "scale_log2": 40.20000000000001,
+      "components": 2,
+      "ntt": true,
+      "place": {
+        "kind": "host",
+        "rank": 0
+      },
+      "context": "poseidon-resnet20-manual-q50"
+    },
+    {
+      "id": "5",
+      "kind": "ciphertext",
+      "level": 4,
+      "scale_log2": 40.2,
+      "components": 2,
+      "ntt": true,
+      "place": {
+        "kind": "host",
+        "rank": 0
+      },
+      "context": "poseidon-resnet20-manual-q50"
+    },
+    {
+      "id": "6",
+      "kind": "ciphertext",
+      "level": 4,
+      "scale_log2": 40.20000000000001,
+      "components": 2,
+      "ntt": true,
+      "place": {
+        "kind": "host",
+        "rank": 0
+      },
+      "context": "poseidon-resnet20-manual-q50"
+    }
+  ],
+  "external_inputs": [
+    "0",
+    "1"
+  ],
+  "initialization": [],
+  "execution": [
+    {
+      "ordinal": 0,
+      "kind": "encode",
+      "output": "2",
+      "payload": {
+        "kind": "inline",
+        "values": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "ordinal": 1,
+      "kind": "compute",
+      "op": "mul_cp",
+      "inputs": [
+        "0",
+        "2"
+      ],
+      "output": "3",
+      "place": {
+        "kind": "host",
+        "rank": 0
+      }
+    },
+    {
+      "ordinal": 2,
+      "kind": "compute",
+      "op": "rescale",
+      "inputs": [
+        "3"
+      ],
+      "output": "4",
+      "place": {
+        "kind": "host",
+        "rank": 0
+      },
+      "attrs": {
+        "target_level": 4,
+        "target_scale_log2": 40.20000000000001
+      }
+    },
+    {
+      "ordinal": 3,
+      "kind": "compute",
+      "op": "mod_switch",
+      "inputs": [
+        "1"
+      ],
+      "output": "5",
+      "place": {
+        "kind": "host",
+        "rank": 0
+      },
+      "attrs": {
+        "target_level": 4
+      }
+    },
+    {
+      "ordinal": 4,
+      "kind": "compute",
+      "op": "add_cc",
+      "inputs": [
+        "4",
+        "5"
+      ],
+      "output": "6",
+      "place": {
+        "kind": "host",
+        "rank": 0
+      }
+    }
+  ],
+  "finalization": [],
+  "final_outputs": [
+    "6"
+  ]
+}

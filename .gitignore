@@ -35,3 +35,4 @@ result
 /compile_flags.txt
 /.clangd
 /review_artifacts/
+/test/scale-boot/cases/*/*/manual.json

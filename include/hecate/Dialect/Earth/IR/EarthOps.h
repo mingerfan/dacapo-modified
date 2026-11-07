@@ -36,6 +36,7 @@ namespace earth {
 ::mlir::RankedTensorType getTensorType(mlir::Value v);
 double actualScale(mlir::Value value);
 bool usesRegionalScalePlanning();
+bool usesScaleAlignmentHoisting();
 } // namespace earth
 } // namespace hecate
 #endif

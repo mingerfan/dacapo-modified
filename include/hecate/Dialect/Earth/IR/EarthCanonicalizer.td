@@ -21,7 +21,9 @@ def structureNotFixed : Constraint<CPred<"!$0.getDefiningOp()->getAttr(\"sm_fixe
 def constantScale : NativeCodeCall<"$_builder.getI64IntegerAttr($0.getType().dyn_cast<::hecate::earth::HEScaleTypeInterface>().getScale())">;
 // The frontend has no selected runtime profile. Its default ring degree must
 // not decide whether a constant covers all slots of the eventual target.
-def hasManagedSlotCapacity : Constraint<CPred<"$0.getDefiningOp()->getParentOfType<::mlir::func::FuncOp>()->hasAttr(\"init_level\")">, "require parameter-managed function">;
+// Hoisted units carry exact (possibly fractional) scales. Replacing them with
+// integer Upscale would invalidate the accepted precision/level plan.
+def hasManagedSlotCapacity : Constraint<CPred<"$0.getDefiningOp()->getParentOfType<::mlir::func::FuncOp>()->hasAttr(\"init_level\") && !($0.getDefiningOp()->hasAttr(\"earth.encoding_scale\") && $0.getDefiningOp()->getParentOfType<::mlir::func::FuncOp>()->hasAttr(\"earth.scale_alignment_policy\"))">, "require managed encoding without a protected exact scale">;
 
 def ZeroUpscalePattern : Pat<(UpscaleOp $arg, $val), (replaceWithValue $arg), [(isZero $val)]>;
 def ZeroModswitchPattern : Pat<(ModswitchOp $arg, $val), (replaceWithValue $arg), [(isZero $val)]>;
