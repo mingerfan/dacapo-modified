@@ -1,0 +1,151 @@
+{
+  "family": "resnet20",
+  "blocks": 2,
+  "pattern": "ConvBN -> exact source SiLU kernel -> ConvBN -> residual add -> exact source SiLU kernel",
+  "reductions": [
+    "one ciphertext instead of all channels",
+    "8 cyclic slots instead of full spatial layout",
+    "deterministic synthetic weights; original full SiLU tree/coefficients retained",
+    "one/two of the nine ResNet20 residual blocks; no full-model accuracy claim"
+  ],
+  "stages": [
+    {
+      "name": "block0.conv1_bn",
+      "first_op": "v0",
+      "last_op": "v25"
+    },
+    {
+      "name": "block0.silu1",
+      "first_op": "v26",
+      "last_op": "v186"
+    },
+    {
+      "name": "block0.conv2_bn",
+      "first_op": "v187",
+      "last_op": "v212"
+    },
+    {
+      "name": "block0.silu2",
+      "first_op": "v214",
+      "last_op": "v374"
+    },
+    {
+      "name": "block1.conv1_bn",
+      "first_op": "v375",
+      "last_op": "v400"
+    },
+    {
+      "name": "block1.silu1",
+      "first_op": "v401",
+      "last_op": "v561"
+    },
+    {
+      "name": "block1.conv2_bn",
+      "first_op": "v562",
+      "last_op": "v587"
+    },
+    {
+      "name": "block1.silu2",
+      "first_op": "v589",
+      "last_op": "v749"
+    }
+  ],
+  "sources": [
+    {
+      "path": "scripts/qwen3_dsl/qwen3/kernels/qwen_nonlinear.py",
+      "sha256": "ebe177d7f4732450ee1c0bbe097dfaeb82598a4860ad2d02f098a05e1dbcc84f",
+      "functions": {
+        "inverse_sqrt": {
+          "line": 169,
+          "end_line": 186
+        },
+        "reciprocal": {
+          "line": 189,
+          "end_line": 200
+        },
+        "small_exp": {
+          "line": 203,
+          "end_line": 216
+        },
+        "normalize_square": {
+          "line": 219,
+          "end_line": 242
+        },
+        "normalize_square_silu": {
+          "line": 245,
+          "end_line": 258
+        }
+      },
+      "extraction": "execute original function AST with symbolic arithmetic"
+    },
+    {
+      "path": "third_party/ckks-runtime/third_party/dacapo/python/poly/poly/MPCB.py",
+      "sha256": "6dc4d64c648a2ad00159186e5cd35c5ed9f22d64c8e1a7e300774fbd933e65e8",
+      "functions": {
+        "GenPoly": {
+          "line": 24,
+          "end_line": 80
+        }
+      },
+      "extraction": "execute original function AST with symbolic arithmetic"
+    },
+    {
+      "path": "third_party/ckks-runtime/third_party/dacapo/python/poly/poly/Func.py",
+      "sha256": "2f6bbd59ba5ede8567f4aab995679ba30f0fe9cc439b62a776c4cb5c8a086b30",
+      "functions": {
+        "HE_SiLU": {
+          "line": 83,
+          "end_line": 85
+        }
+      },
+      "extraction": "execute original function AST with symbolic arithmetic"
+    },
+    {
+      "path": "third_party/ckks-runtime/third_party/dacapo/python/poly/poly/data/treeStr.txt",
+      "sha256": "c8fd9cb979aca6c4d36d0bfe779d6d16aff3ea6b0fd2f18b37baa85b8c2dd0fd",
+      "extraction": "pattern topology or polynomial data; reduced dimensions documented per case"
+    },
+    {
+      "path": "third_party/ckks-runtime/third_party/dacapo/python/poly/poly/data/coeffStr.txt",
+      "sha256": "30fc9ac1244dedb9985d248046eb8e498f4e8a1616e08329afd258ad912ec701",
+      "extraction": "pattern topology or polynomial data; reduced dimensions documented per case"
+    },
+    {
+      "path": "third_party/ckks-runtime/third_party/dacapo/python/poly/poly/models/ResNet.py",
+      "sha256": "c72240eb23641314cf07436dfe92561be870b278be9ef9cc35ef9133edeeb2a3",
+      "extraction": "pattern topology or polynomial data; reduced dimensions documented per case"
+    },
+    {
+      "path": "scripts/qwen3_dsl/qwen3/kernels/qwen_layers.py",
+      "sha256": "a20fa7659919c84c76981a9daf880651e22f7c88507be9af8bdba2c54597bd27",
+      "extraction": "pattern topology or polynomial data; reduced dimensions documented per case"
+    },
+    {
+      "path": "scripts/qwen3_dsl/qwen3/kernels/qwen_model.py",
+      "sha256": "92979e358a03ac47d903e057aa9cb9baa6da62f5ca75e8a44e42e6ab8607c5ca",
+      "extraction": "pattern topology or polynomial data; reduced dimensions documented per case"
+    },
+    {
+      "path": "third_party/ckks-runtime/third_party/dacapo/examples/benchmarks/ResNet.py",
+      "sha256": "a88b1a6641c3588a08fcd211cd06b693e4074190c09278483b613a186982849e",
+      "extraction": "pattern topology or polynomial data; reduced dimensions documented per case"
+    },
+    {
+      "path": "third_party/ckks-runtime/integrations/dacapo/generate_resnet20_manual_profiles.py",
+      "sha256": "4373fbf8bcbf13e6a09b6449559b5ad7dc4f244f94c66f6c9fd9112d8028634b",
+      "functions": {
+        "generate": {
+          "line": 13,
+          "end_line": 50
+        }
+      },
+      "extraction": "execute original function AST with symbolic arithmetic"
+    }
+  ],
+  "original_operation_counts": {
+    "rotate": 32,
+    "mul": 356,
+    "add": 306,
+    "negate": 28
+  }
+}

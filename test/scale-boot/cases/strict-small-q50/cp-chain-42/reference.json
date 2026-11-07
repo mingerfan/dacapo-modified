@@ -1,0 +1,20 @@
+{
+  "origin": "hand-authored-recipe",
+  "boot_count": 2,
+  "global_optimality_proven": false,
+  "explanation": "42 \u6b21\u660e\u6587\u4e58\u6cd5\uff1a\u7b2c 16\u300131 \u6b21\u4e58\u6cd5\u524d\u5237\u65b0\uff0c\u8986\u76d6\u8fde\u7eed\u4e24\u6b21 Boot\u3002 \u4fdd\u7559 s\u226540 \u7684\u9010\u64cd\u4f5c Rescale\uff1bBoot \u524d\u663e\u5f0f\u5bf9\u9f50\u81f3 L5/s40\u3002\u4ec5\u4fdd\u8bc1\u5408\u6cd5\uff0c\u4e0d\u5ba3\u79f0\u5168\u5c40\u6700\u4f18\u3002",
+  "inputs_sha256": {
+    "graph": "0aa44396c8f77a2e5ab19d24f182c5fc332e7bf5012b1f1904a01fb0f824dfb8",
+    "case": "f78b8d8488c94d8d58c58f9286561f349923d2298ad6927941188baab9f8ae92",
+    "recipe": "b85c5fcbccf69820ddad6604c62c7e615d42c3f339f2481296d4745f4d3053df",
+    "operator_spec": "2459ba778e7105b827c4125fedcc5a417445910ccf5ad93985364ab7b6136cf3",
+    "generator": "e8a34765323fa32e65615635f3b90483c9b20f30e2ff8b7661d410f120c320d2"
+  },
+  "graph_metrics": {
+    "compute_ops": 42,
+    "multiplicative_depth": 42
+  },
+  "rescale_levels": 60,
+  "plan_source": "recipe",
+  "plan_sha256": "c15f15e0766d9376ab282eb7dfb945be06e6a0a8584516ef1364108ac52b8472"
+}

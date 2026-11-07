@@ -1,0 +1,5 @@
+{
+  "boots_before": {"v9": ["v8"]},
+  "rescale_after_each_operation": true,
+  "explanation": "Keep the original x for the residual. Square nine times, refreshing only v8 before the tenth square. Explicitly align that value to Boot input scale 40 and level 5; Boot returns level 30/scale 40. Perform the remaining nine squares and add the original x. Rescale after each operation while preserving scale >= 40. Use one Boot; this is a feasible hand-authored reference, not a global optimality proof."
+}

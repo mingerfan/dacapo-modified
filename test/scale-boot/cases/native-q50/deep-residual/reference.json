@@ -1,0 +1,15 @@
+{
+  "origin": "hand-authored-recipe",
+  "boot_count": 1,
+  "global_optimality_proven": false,
+  "explanation": "Keep the original x for the residual. Square nine times, refreshing only v8 before the tenth square. Explicitly align that value to Boot input scale 40 and level 5; Boot returns level 30/scale 40. Perform the remaining nine squares and add the original x. Rescale after each operation while preserving scale >= 40. Use one Boot; this is a feasible hand-authored reference, not a global optimality proof.",
+  "inputs_sha256": {
+    "graph": "b46088bc373e8fdde975ba2d0f224d5e5e3e55651eecbd97d7e65ced6a2a8431",
+    "case": "7b0169ab37eb58ae88fa206acc4d77d50a7649144eee177d41cc8e142f1120ec",
+    "operator_spec": "2459ba778e7105b827c4125fedcc5a417445910ccf5ad93985364ab7b6136cf3",
+    "generator": "e8a34765323fa32e65615635f3b90483c9b20f30e2ff8b7661d410f120c320d2",
+    "recipe": "16b7ea723df07ec1f013d73fb349a2cf1abaa2b7a0e6c5a10e376192fd18860d"
+  },
+  "plan_source": "recipe",
+  "plan_sha256": "997321a2e90538ff62c9a011c2d71d8fe3c1a6f4b1d32ccf6664c94177ef6d27"
+}

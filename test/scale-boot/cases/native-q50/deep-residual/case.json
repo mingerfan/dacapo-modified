@@ -1,0 +1,115 @@
+{
+  "format_version": 1,
+  "case_id": "deep-residual",
+  "input_names": [
+    "x",
+    "y"
+  ],
+  "inputs": [
+    {
+      "kind": "ciphertext",
+      "level": 30,
+      "scale_log2": 40,
+      "components": 2,
+      "ntt": true
+    },
+    {
+      "kind": "ciphertext",
+      "level": 30,
+      "scale_log2": 40,
+      "components": 2,
+      "ntt": true
+    }
+  ],
+  "outputs": [
+    {
+      "kind": "ciphertext",
+      "min_level": 4,
+      "min_scale_log2": 40,
+      "max_scale_log2": 70,
+      "components": 2,
+      "ntt": true
+    }
+  ],
+  "min_ciphertext_scale_log2": 40,
+  "min_plaintext_scale_log2": 40,
+  "min_unit_plaintext_scale_log2": 30,
+  "numeric_tolerance": {
+    "abs": 1e-10,
+    "rel": 1e-10
+  },
+  "test_vectors": [
+    {
+      "inputs": [
+        [
+          1,
+          0,
+          0.999999,
+          1.000001,
+          -1,
+          0.999998,
+          0.5,
+          -0.5
+        ],
+        [
+          0.125,
+          0.125,
+          0.125,
+          0.125,
+          0.125,
+          0.125,
+          0.125,
+          0.125
+        ]
+      ],
+      "outputs": [
+        [
+          2,
+          0,
+          1.7693991212452285,
+          2.2997145173492575,
+          0,
+          1.5919743914079851,
+          0.5,
+          -0.5
+        ]
+      ]
+    },
+    {
+      "inputs": [
+        [
+          0,
+          -1,
+          1,
+          0.999997,
+          0.999996,
+          -0.999999,
+          -0.5,
+          0.5
+        ],
+        [
+          0.125,
+          0.125,
+          0.125,
+          0.125,
+          0.125,
+          0.125,
+          0.125,
+          0.125
+        ]
+      ],
+      "outputs": [
+        [
+          0,
+          0,
+          2,
+          1.4554634685267054,
+          1.3504316805097945,
+          -0.23059887875477136,
+          -0.5,
+          0.5
+        ]
+      ]
+    }
+  ]
+}

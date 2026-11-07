@@ -6,6 +6,18 @@ add_test(NAME DacapoScaleBootVerifier
 add_test(NAME DacapoScaleAlignmentVerifier
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check-alignment.py)
+add_test(NAME DacapoScaleBootReferences
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check-reference.py)
+add_test(NAME DacapoScaleBootLarge
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check-large.py)
+find_program(DACAPO_GRAPHVIZ_DOT NAMES dot)
+if(DACAPO_GRAPHVIZ_DOT)
+  add_test(NAME DacapoScaleBootGraphs
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check-graphs.py)
+endif()
 add_test(NAME DacapoScaleBootCompiler
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check-compiler.py

@@ -1,0 +1,18 @@
+{
+  "origin": "independent-python-search",
+  "beam_width": 256,
+  "explored_transitions": 4,
+  "beam_discarded_states": 0,
+  "boot_count": 0,
+  "global_optimality_proven": true,
+  "proof": "Boot counts are nonnegative; this legal plan uses zero.",
+  "search_scope": "Original live instruction order; coefficient scale 40; optional operand Boot and one-Q rescale prefixes; explicit Boot-contract alignment; upward unit alignment; shared future aliases. No global optimum claim.",
+  "inputs_sha256": {
+    "graph": "d23508de3d218494c9539c048e0439984793e7dbe19faf70824e1bfcd1f9b7b2",
+    "case": "97d41d3c510127b148cb53018c0f16c2c3cdf6bab2480e840df9b29a8abaf08a",
+    "operator_spec": "199d0d0bf798e18e42278ff73bdcbae310a984c78e6202041d1c1f3fcdc08514",
+    "generator": "e8a34765323fa32e65615635f3b90483c9b20f30e2ff8b7661d410f120c320d2"
+  },
+  "plan_source": "search",
+  "plan_sha256": "0606650b0ca0e6a714cdf6f7c49e5e3f997da8065683e74439c5942f93a9dc85"
+}

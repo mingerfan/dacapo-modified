@@ -1,0 +1,51 @@
+{
+  "boots_before": {
+    "v44": [
+      "v43"
+    ],
+    "v92": [
+      "v91"
+    ],
+    "v106": [
+      "v103"
+    ],
+    "v107": [
+      "v104"
+    ],
+    "v109": [
+      "v106"
+    ],
+    "v135": [
+      "v134"
+    ],
+    "v165": [
+      "v164"
+    ],
+    "v184": [
+      "v180"
+    ],
+    "v185": [
+      "v181"
+    ],
+    "v186": [
+      "v182"
+    ],
+    "v187": [
+      "v183"
+    ],
+    "v248": [
+      "v247"
+    ],
+    "v262": [
+      "v261"
+    ],
+    "v263": [
+      "v260"
+    ],
+    "v265": [
+      "v262"
+    ]
+  },
+  "rescale_after_each_operation": true,
+  "explanation": "Independent Python local operand-refresh search, reserve L>=8 for exact L5/s40 Boot alignment, prefer fewer refreshes then more remaining level. Frozen decisions; no compiler output used. Feasible baseline, no global optimality proof."
+}

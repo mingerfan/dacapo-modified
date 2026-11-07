@@ -1,0 +1,16 @@
+{
+  "origin": "independent-python-local-search-frozen-recipe",
+  "boot_count": 5,
+  "global_optimality_proven": false,
+  "explanation": "Independent Python local operand-refresh search, reserve L>=8 for exact L5/s40 Boot alignment, prefer fewer refreshes then more remaining level. Frozen decisions; no compiler output used. Feasible baseline, no global optimality proof.",
+  "inputs_sha256": {
+    "graph": "ec8b3228591990632dac3bb17e78b2572b64aed9977923007ab10c53abb8a758",
+    "case": "89a01da3462db679f7f4f9903447fdf21127eb19d421eb2e15e8c2ae407f6179",
+    "recipe": "caa9195a1b9e3da59489b06346042b52d6dba076d294167ba9bf8acea4bc06f5",
+    "pattern": "64f1e6b89395fc8c47740d47554ac6ea9d5e1ac9d38a1e3aaed8abdb9a25e74b",
+    "operator_spec": "2459ba778e7105b827c4125fedcc5a417445910ccf5ad93985364ab7b6136cf3",
+    "generator": "de6147480167e7b7ee00afbfdbb82b46c1b0ae2889f604422b55f7af20bc90a4"
+  },
+  "plan_source": "recipe",
+  "plan_sha256": "6114a8543b412fdfc2af547ecdf7e18e2c4cc68db857f8d528775c534513cfda"
+}

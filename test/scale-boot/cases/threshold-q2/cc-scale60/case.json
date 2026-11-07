@@ -1,0 +1,115 @@
+{
+  "format_version": 1,
+  "case_id": "cc-scale60",
+  "input_names": [
+    "x",
+    "y"
+  ],
+  "inputs": [
+    {
+      "kind": "ciphertext",
+      "level": 6,
+      "scale_log2": 40,
+      "components": 2,
+      "ntt": true
+    },
+    {
+      "kind": "ciphertext",
+      "level": 6,
+      "scale_log2": 40,
+      "components": 2,
+      "ntt": true
+    }
+  ],
+  "outputs": [
+    {
+      "kind": "ciphertext",
+      "min_level": 4,
+      "min_scale_log2": 40,
+      "max_scale_log2": 70,
+      "components": 2,
+      "ntt": true
+    }
+  ],
+  "min_ciphertext_scale_log2": 40,
+  "min_plaintext_scale_log2": 40,
+  "min_unit_plaintext_scale_log2": 0,
+  "numeric_tolerance": {
+    "abs": 1e-10,
+    "rel": 1e-10
+  },
+  "test_vectors": [
+    {
+      "inputs": [
+        [
+          0.25,
+          -0.5,
+          0.75,
+          1,
+          -1,
+          0.125,
+          -0.25,
+          0.5
+        ],
+        [
+          0.75,
+          0.25,
+          -0.5,
+          0.125,
+          0.5,
+          -0.25,
+          1,
+          -0.75
+        ]
+      ],
+      "outputs": [
+        [
+          0.195113251875,
+          -0.13007550125,
+          -0.39022650375,
+          0.13007550125,
+          -0.520302005,
+          -0.0325188753125,
+          -0.2601510025,
+          -0.39022650375
+        ]
+      ]
+    },
+    {
+      "inputs": [
+        [
+          0.2,
+          0.3,
+          -0.4,
+          0.5,
+          -0.6,
+          0.7,
+          -0.8,
+          0.9
+        ],
+        [
+          -0.3,
+          0.5,
+          0.7,
+          -0.9,
+          0.1,
+          -0.2,
+          0.4,
+          -0.6
+        ]
+      ],
+      "outputs": [
+        [
+          -0.0624362406,
+          0.15609060149999998,
+          -0.2913691228,
+          -0.46827180450000006,
+          -0.0624362406,
+          -0.1456845614,
+          -0.33299328320000005,
+          -0.5619261654
+        ]
+      ]
+    }
+  ]
+}

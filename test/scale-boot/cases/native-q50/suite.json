@@ -1,0 +1,7 @@
+{
+  "name": "native-q50",
+  "cases": [
+    "deep-residual"
+  ],
+  "description": "Actual manual Q50 modulus fixture, 8-slot compile-only replay; Boot input level 5/scale 40, output level 30/scale 40, unit-encoding floor 30. Reduced degree is a structural test, not deployed encryption parameters."
+}

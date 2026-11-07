@@ -1,0 +1,14 @@
+{
+  "name": "strict-small-q50",
+  "description": "Small graphs with substantial multiplicative depth. Initial L30/s40; Boot L5/s40 -> L30/s40. Actual 50-modulus fixture; degree16 is compile-only. Hand-authored schedules, not global optimum proofs.",
+  "cases": [
+    "cp-chain-12",
+    "cp-chain-30",
+    "cp-chain-42",
+    "cc-chain-30",
+    "square-chain-18",
+    "shared-prefix-fork",
+    "long-residual",
+    "independent-branches"
+  ]
+}

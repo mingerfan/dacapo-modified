@@ -1,0 +1,26 @@
+{
+  "name": "threshold-q2",
+  "cases": [
+    "cp-double-rescale",
+    "cc-double-rescale",
+    "cc-scale60",
+    "shared-square",
+    "unequal-depth-residual",
+    "equal-nominal-residual",
+    "depth-zero-unary-fanout",
+    "unary-only",
+    "exhausted-input",
+    "exhausted-shared-input",
+    "one-q-before-double-rescale",
+    "dead-branch",
+    "mixed-0",
+    "mixed-1",
+    "mixed-2",
+    "mixed-3",
+    "mixed-4",
+    "mixed-5"
+  ],
+  "description": "18 existing graph shapes; synthetic nominal 30-bit modulus integers from threshold regression; waterline 40, initial/Boot level 6, minimum level 4, output scales [40,70]. Not deployable encryption parameters.",
+  "source": "test/runtime-plan/check-threshold-graphs.py cases()",
+  "scope": "Frozen independently generated Python references, not compiler outputs."
+}
