@@ -124,6 +124,9 @@ FailureOr<RuntimePlanLayout> buildRuntimePlanLayout(func::FuncOp func) {
 }
 
 bool canReuseRuntimeInput(Operation *operation, func::FuncOp func) {
+  // An opaque prepared callback makes no in-place aliasing promise.
+  if (isa<ApiCallOp>(operation))
+    return false;
   if (operation->getNumOperands() == 0 || operation->getNumResults() != 1)
     return false;
   Value input = operation->getOperand(0), output = operation->getResult(0);

@@ -733,6 +733,10 @@ FailureOr<int64_t> operationCost(Operation *op, const Json &spec,
                                  llvm::StringRef bootProfile,
                                  bool &requiresHost) {
   requiresHost = false;
+  // Prepared API tasks already include their internal Rescales and Boot. Their
+  // latency is independent of OperatorSpec's primitive latency/Boot tables.
+  if (auto call = dyn_cast<ckks::ApiCallOp>(op))
+    return call.getLatencyUsAttr().getInt();
   llvm::StringRef name = operatorName(op);
   if (name.empty()) {
     op->emitError("unsupported operation in CKKS placement");

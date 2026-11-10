@@ -8,9 +8,10 @@ include "mlir/Pass/PassBase.td"
 def EmitRuntimePlan : Pass<"emit-runtime-plan", "::mlir::func::FuncOp"> {
   let summary = "Emit a Host or placed RuntimePlan binary or diagnostic JSON file";
   let description = [{
-    Serializes a linear CKKS function to RuntimePlan V1. Unplaced functions use
+    Serializes a linear CKKS function to RuntimePlan. Unplaced functions use
     Host rank 0. Placed functions preserve rank/device assignments and explicit
-    dist.transfer operations.
+    dist.transfer operations. Prepared ckks.apicall tasks use RuntimePlan V7
+    without changing their physical metadata or internal scale/Boot decisions.
   }];
   let options = [
     Option<"prefix", "prefix", "std::string", /*default=*/[{""}],
@@ -90,7 +91,8 @@ def AssignPlacement : Pass<"assign-ckks-placement", "::mlir::func::FuncOp"> {
   let summary = "Assign CKKS compute operations to a static rank/place topology";
   let description = [{
     Uses deterministic HEFT list scheduling. Operator latency comes from an
-    OperatorSpec V2 file. Communication can use a payload-aware profile with
+    OperatorSpec V2 file, except ckks.apicall uses its own latency_us attribute.
+    Communication can use a payload-aware profile with
     rate limits and optional payload/rate interpolation points, or legacy fixed
     intra-rank and inter-rank costs.
   }];
@@ -98,7 +100,7 @@ def AssignPlacement : Pass<"assign-ckks-placement", "::mlir::func::FuncOp"> {
     Option<"deviceCounts", "device-counts", "std::string", /*default=*/[{""}],
            "Per-rank device counts; all-zero values select CPU Host ranks">,
     Option<"operatorSpecPath", "operator-spec", "std::string", /*default=*/[{""}],
-           "OperatorSpec V2 JSON used for compute latency">,
+           "OperatorSpec V2 JSON for primitive latency and communication context">,
     Option<"bootProfile", "boot-profile", "std::string", /*default=*/[{""}],
            "OperatorSpec V2 Boot profile used for Boot latency">,
     Option<"communicationProfilePath", "communication-profile", "std::string",

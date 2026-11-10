@@ -29,15 +29,40 @@ CKKS operations have pure SSA results. `!ckks.poly` carries components, scale_lo
 | `plan-plaintext-waterline` | Lower direct Host Encode uploads to Device Prepare and check complete single-group capacity |
 | `plan-runtime-memory` | Plan last-use Release and supported input reuse |
 | `estimate-runtime-memory` | Report RNS object storage under sequential completion |
-| `emit-runtime-plan` | Export semantic RuntimePlan V1/V2/V3/V4 as binary or JSON |
+| `emit-runtime-plan` | Export semantic RuntimePlan V1–V5/V7 as binary or JSON |
 
-Run `hecate-opt --help` for options. Plain eager plans use V1, memory instructions use V2, execution Encode or explicit Fence uses V3, and Waterline Prepare/configuration uses V4. Format versions describe different semantics; they do not select the binary container version.
+Run `hecate-opt --help` for options. Plain eager plans use V1, memory instructions use V2, execution Encode or explicit Fence uses V3, Waterline Prepare/configuration uses V4, and prepared API calls use V7. Format versions describe different semantics; they do not select the binary container version.
 
 Export defaults to binary: `.runtime-plan.bin`, a packed bundle with `manifest.bin` and `data.bin`. For readable instructions use `--runtime-plan-format=json --runtime-plan-pretty=true`; export pass options are `plan-format=json pretty=true`. Binary uses `plan-format=binary`, requires `bundle-format=pack` and `pretty=false`, and has versioned little-endian `CKKSPL01` / `CKKSMF01` headers. Use separate prefixes for JSON and binary artifacts.
 
 Bundles default to storage V2 pack. Legacy per-blob output requires both `--runtime-plan-format=json --runtime-plan-bundle-format=files` (pass: `plan-format=json bundle-format=files`). Inline Encode payloads default to a 4096-byte threshold; larger payloads are deduplicated by content ID.
 
 For GPU plans, `--runtime-plan-device-counts=1` or `=4` enables placement and communication. `--runtime-plan-memory --runtime-plan-memory-report` adds Release/reuse and before/after per-place estimates. Eager mode keeps Encode/uploads in initialization; Release alone does not make all weights lazy. Estimates count 8-byte Host and 4-byte GPU RNS words, excluding keys, workspaces, transfer staging and allocator pools.
+
+## Prepared API calls (RuntimePlan V7)
+
+`ckks.apicall` represents an externally prepared ciphertext callback, not CKKS arithmetic to be planned. It takes zero or more polynomial tensors and returns one ciphertext tensor. `callee` must be nonempty, `call_id` must be a unique nonnegative i64, and `latency_us` must be positive. HEFT uses that latency directly. See [`test/prepared-api/branching.mlir`](test/prepared-api/branching.mlir) for generic MLIR syntax and a five-node branching example.
+
+The callback has already fixed its internal scale changes and Boot operations. This path does **not** plan them: keep physical levels/scales in `!ckks.poly<components * scale_log2 * level>`, disable Rescale coalescing, and do not request physical-level remapping. Physical level, scale and components are exported in RuntimePlan `values`. Arbitrary extra MLIR attributes remain unchanged in the placed IR; they are not added to the RuntimePlan schema.
+
+The zero-input stem calls an external, persistent prepared object that already owns its input/weights. Those objects are prepared outside this compilation; they are not implicit function arguments or compiler-generated plaintext initialization. `callee` names the callback registered by the runtime caller. The compiler does not implement or interpret that callback.
+
+```bash
+spec=test/runtime-plan/placement-operator-spec.json
+build/manual/bin/hecate-opt test/prepared-api/branching.mlir \
+  --ckks-to-runtime-plan --ckks-config=config.json \
+  --runtime-plan-coalesce-rescales=false --runtime-plan-levels-per-logical-level=1 \
+  --runtime-plan-device-counts=1 --runtime-plan-operator-spec-path="$spec" \
+  --runtime-plan-target-id=dacapo-placement-test --runtime-plan-context-id=test-context \
+  --runtime-plan-operator-spec-id=dacapo-placement-test-v1 \
+  --runtime-plan-operator-spec-sha256="sha256:$(sha256sum "$spec" | cut -d' ' -f1)" \
+  --runtime-plan-memory --runtime-plan-memory-reuse=false \
+  --runtime-plan-format=json -o /tmp/prepared.mlir
+```
+
+This emits `/tmp/prepared.prepared_branching.runtime-plan.json`. Omit `--runtime-plan-format=json` for binary output. Both use semantic `format_version: 7`; the binary container remains `CKKSPL01` version 1. Each call is an ordinary compute instruction with `op: "ApiCall"` and `attrs: {"callee": "prepared_stem", "call_id": "41"}`. `call_id` is a canonical decimal **string**, distinct from the plan's ValueIds. `inputs`, `output`, `place`, transfers and Release follow the normal RuntimePlan protocol. Opaque calls do not support input reuse. This is executable RuntimePlan, not a separate experiment schedule format.
+
+`DacapoPreparedApiRuntimePlan` checks JSON/binary agreement, one/two-device placement, dependency order, physical metadata/custom-attribute preservation and invalid API calls using only Python's standard library.
 
 ## Waterline plaintext preparation
 

@@ -106,6 +106,19 @@ void hecate::ckks::CKKSDialect::initialize() {
   mlir::RankedTensorType::attachInterface<PolyTypeTensorModel>(*getContext());
 }
 
+::mlir::LogicalResult hecate::ckks::ApiCallOp::verify() {
+  if (getCallIdAttr().getInt() < 0)
+    return emitOpError("call_id must be nonnegative");
+  if (getLatencyUsAttr().getInt() <= 0)
+    return emitOpError("latency_us must be positive");
+  if (getCallee().empty())
+    return emitOpError("callee must be nonempty");
+  auto result = ckks::getPolyType(getResult());
+  if (!result || result.getComponents() < 2)
+    return emitOpError("result must be ciphertext");
+  return ::mlir::success();
+}
+
 ::mlir::LogicalResult hecate::ckks::EncodeOp::verify() {
   if (ckks::getPolyType(getResult()).getComponents() != 1)
     return emitOpError("result must be plaintext with one component");

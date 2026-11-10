@@ -253,10 +253,13 @@ private:
           wire.number(bits);
         });
     } else if (tag == 1) {
-      const auto op =
-          choice(r.at("op"), {"add_cc", "add_cp", "sub_cc", "sub_cp", "mul_cc",
-                              "mul_cp", "negate", "rotate", "rescale",
-                              "mod_switch", "relinearize", "boot"});
+      // Compute kind 12 and attribute tag 5 are reserved for V6.
+      const auto op = r.at("op") == "ApiCall"
+                          ? uint8_t{13}
+                          : choice(r.at("op"), {"add_cc", "add_cp", "sub_cc",
+                                                "sub_cp", "mul_cc", "mul_cp",
+                                                "negate", "rotate", "rescale",
+                                                "mod_switch", "relinearize", "boot"});
       wire.number<uint8_t>(op);
       sequence(r.at("inputs"), [&](const J &v) { id(v); });
       id(r.at("output"));
@@ -265,13 +268,17 @@ private:
                             : op == 8  ? 2
                             : op == 9  ? 3
                             : op == 11 ? 4
+                            : op == 13 ? 6 // Tag 5 is reserved for V6.
                                        : 0;
       wire.number<uint8_t>(attrs);
       if (attrs) {
         const auto &a = r.at("attrs");
         if (attrs == 1)
           i32(a.at("steps"));
-        else {
+        else if (attrs == 6) {
+          stringRef(a.at("callee"));
+          id(a.at("call_id"));
+        } else {
           i32(a.at("target_level"));
           if (attrs == 2 && metadata.value("format_version", 1) >= 5)
             wire.real(a.at("target_scale_log2").get<double>());

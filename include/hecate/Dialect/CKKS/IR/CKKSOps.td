@@ -39,6 +39,15 @@ class CKKS_Op<string mnemonic, list<Trait> traits = []> :
   let results = (outs PolyTensor:$result);
 }
 
+// A prepared callback is an opaque task: its internal scale/Boot decisions are
+// already fixed. Extra attributes carry physical metadata without interpretation.
+def ApiCallOp : CKKS_Op<"apicall"> {
+  let summary = "Invoke one externally prepared CKKS ciphertext task";
+  let arguments = (ins Variadic<PolyTensor>:$inputs, StrAttr:$callee,
+                       I64Attr:$call_id, I64Attr:$latency_us);
+  let hasVerifier = 1;
+}
+
 // Constants are kept as real MLIR attributes. The legacy integer .cst index is
 // intentionally not part of the RuntimePlan path.
 // Payload and result type fully determine the encoded plaintext before

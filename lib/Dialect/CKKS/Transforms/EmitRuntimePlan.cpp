@@ -25,6 +25,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #ifdef __linux__
 #include <sys/resource.h>
@@ -788,6 +789,10 @@ private:
 
 private:
   LogicalResult assignIds() {
+    std::set<int64_t> callIds;
+    for (auto call : func.getOps<ckks::ApiCallOp>())
+      if (!callIds.insert(call.getCallId()).second)
+        return call.emitError("duplicate prepared API call_id");
     auto layout = ckks::buildRuntimePlanLayout(func);
     if (failed(layout))
       return failure();
@@ -819,7 +824,7 @@ private:
         auto attr = op->getAttrOfType<FloatAttr>("runtime.scale_log2");
         if (!attr) return op->emitError("native encoding is missing its actual scale"), failure();
         scale = attr.getValueAsDouble();
-      } else if (!isa<ckks::BootstrapCOp>(op)) {
+      } else if (!isa<ckks::BootstrapCOp, ckks::ApiCallOp>(op)) {
         if (op->getNumOperands() == 0) return op->emitError("cannot resolve actual scale"), failure();
         auto input = actualScale(op->getOperand(0));
         if (failed(input)) return failure();
@@ -908,6 +913,10 @@ private:
                         {"inputs", std::move(inputIds)},
                         {"output", std::to_string(outputId)}};
     if (Attribute reuse = op->getAttr("runtime.reuse_input")) {
+      if (isa<ckks::ApiCallOp>(op)) {
+        op->emitError("prepared API calls do not support runtime.reuse_input");
+        return failure();
+      }
       auto index = dyn_cast<IntegerAttr>(reuse);
       if (!index || index.getInt() != 0) {
         op->emitError("runtime.reuse_input must be integer zero");
@@ -920,7 +929,12 @@ private:
 
   FailureOr<Json> buildCompute(Operation *op, uint64_t outputId) {
     FailureOr<Json> instruction = failure();
-    if (auto value = dyn_cast<ckks::AddCCOp>(op))
+    if (auto call = dyn_cast<ckks::ApiCallOp>(op)) {
+      instruction = makeCompute(op, outputId, "ApiCall", call.getInputs());
+      if (succeeded(instruction))
+        (*instruction)["attrs"] = {{"callee", call.getCallee().str()},
+                                    {"call_id", std::to_string(call.getCallId())}};
+    } else if (auto value = dyn_cast<ckks::AddCCOp>(op))
       instruction =
           makeCompute(op, outputId, "add_cc", {value.getLhs(), value.getRhs()});
     else if (auto value = dyn_cast<ckks::AddCPOp>(op))
@@ -1089,10 +1103,12 @@ struct EmitRuntimePlanPass
     bool version2 = func->hasAttr("runtime.memory_planned");
     bool version3 = false;
     bool version4 = func->hasAttr("runtime.waterline");
+    bool version7 = false;
     func.walk([&](Operation *op) {
       version2 |=
           isa<dist::ReleaseOp>(op) || op->hasAttr("runtime.reuse_input");
       version3 |= isa<dist::FenceOp>(op) || op->hasAttr("runtime.online_encode");
+      version7 |= isa<ckks::ApiCallOp>(op);
     });
     const auto exportStart = Clock::now();
     const auto rssStart = residentBytes();
@@ -1117,7 +1133,7 @@ struct EmitRuntimePlanPass
         reportIo.getValue());
     double buildSeconds = 0, serializationSeconds = 0;
     auto emit = [&](auto &writer) -> LogicalResult {
-      writer.field("format_version", func->hasAttr("ckks.rns_moduli") ? 5 : version4 ? 4 : version3 ? 3 : (version2 ? 2 : 1));
+      writer.field("format_version", version7 ? 7 : func->hasAttr("ckks.rns_moduli") ? 5 : version4 ? 4 : version3 ? 3 : (version2 ? 2 : 1));
       if (version4) {
         auto c = func->getAttrOfType<StringAttr>("runtime.waterline");
         writer.field("waterline", Json::parse(c.getValue().str()));
