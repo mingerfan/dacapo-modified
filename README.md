@@ -19,7 +19,7 @@ ctest --test-dir build/nix --output-on-failure
 
 ## RuntimePlan pipeline
 
-CKKS operations have pure SSA results. `!ckks.poly` carries components, scale_log2 and the Runtime-direction level: larger levels retain more RNS moduli.
+CKKS operations have single SSA results. `!ckks.poly` carries components, scale_log2 and the Runtime-direction level: larger levels retain more RNS moduli. Prepared calls can also produce and consume an opaque `!ckks.buffer`.
 
 | Pass | Purpose |
 | --- | --- |
@@ -29,9 +29,9 @@ CKKS operations have pure SSA results. `!ckks.poly` carries components, scale_lo
 | `plan-plaintext-waterline` | Lower direct Host Encode uploads to Device Prepare and check complete single-group capacity |
 | `plan-runtime-memory` | Plan last-use Release and supported input reuse |
 | `estimate-runtime-memory` | Report RNS object storage under sequential completion |
-| `emit-runtime-plan` | Export semantic RuntimePlan V1–V5/V7 as binary or JSON |
+| `emit-runtime-plan` | Export semantic RuntimePlan V1–V5/V7–V8 as binary or JSON |
 
-Run `hecate-opt --help` for options. Plain eager plans use V1, memory instructions use V2, execution Encode or explicit Fence uses V3, Waterline Prepare/configuration uses V4, and prepared API calls use V7. Format versions describe different semantics; they do not select the binary container version.
+Run `hecate-opt --help` for options. Plain eager plans use V1, memory instructions use V2, execution Encode or explicit Fence uses V3, Waterline Prepare/configuration uses V4, prepared API calls use V7, and plans containing opaque buffers or device-resident external ciphertexts use V8. Format versions describe different semantics; they do not select the binary container version.
 
 Export defaults to binary: `.runtime-plan.bin`, a packed bundle with `manifest.bin` and `data.bin`. For readable instructions use `--runtime-plan-format=json --runtime-plan-pretty=true`; export pass options are `plan-format=json pretty=true`. Binary uses `plan-format=binary`, requires `bundle-format=pack` and `pretty=false`, and has versioned little-endian `CKKSPL01` / `CKKSMF01` headers. Use separate prefixes for JSON and binary artifacts.
 
@@ -39,11 +39,13 @@ Bundles default to storage V2 pack. Legacy per-blob output requires both `--runt
 
 For GPU plans, `--runtime-plan-device-counts=1` or `=4` enables placement and communication. `--runtime-plan-memory --runtime-plan-memory-report` adds Release/reuse and before/after per-place estimates. Eager mode keeps Encode/uploads in initialization; Release alone does not make all weights lazy. Estimates count 8-byte Host and 4-byte GPU RNS words, excluding keys, workspaces, transfer staging and allocator pools.
 
-## Prepared API calls (RuntimePlan V7)
+## Prepared API calls (RuntimePlan V7/V8)
 
-`ckks.apicall` represents an externally prepared ciphertext callback, not CKKS arithmetic to be planned. It takes zero or more polynomial tensors and returns one ciphertext tensor. `callee` must be nonempty, `call_id` must be a unique nonnegative i64, and `latency_us` must be positive. HEFT uses that latency directly. See [`test/prepared-api/branching.mlir`](test/prepared-api/branching.mlir) for generic MLIR syntax and a five-node branching example.
+`ckks.apicall` represents an externally prepared callback, not CKKS arithmetic to be planned. It takes zero or more ciphertext tensors or opaque buffers and returns exactly one ciphertext tensor or opaque buffer. Plaintexts are not ApiCall inputs; use ordinary CKKS operations for plaintext arithmetic. Ciphertext results may have three components, for example before relinearization. `callee` must be nonempty, `call_id` must be a unique nonnegative i64, and `latency_us` must be positive. HEFT uses that latency directly. See [`test/prepared-api/branching.mlir`](test/prepared-api/branching.mlir) for generic MLIR syntax and a five-node branching example.
 
-The callback has already fixed its internal scale changes and Boot operations. This path does **not** plan them: keep physical levels/scales in `!ckks.poly<components * scale_log2 * level>`, disable Rescale coalescing, and do not request physical-level remapping. Physical level, scale and components are exported in RuntimePlan `values`. Arbitrary extra MLIR attributes remain unchanged in the placed IR; they are not added to the RuntimePlan schema.
+The callback has already fixed its internal scale changes and Boot operations. This path does **not** plan them: keep physical levels/scales in `!ckks.poly<components * scale_log2 * level>`, disable Rescale coalescing, and do not request physical-level remapping. Physical level, scale and components are exported in RuntimePlan `values`. For a noninteger actual scale, keep the nominal rounded unsigned scale in `!ckks.poly` and set `runtime.scale_log2 = 40.125 : f64` on the ApiCall. Ciphertext function arguments use `earth.arg_scales = array<f64: ...>`. Actual scales are exported as float64; the compiler does not infer a callback's internal scale changes. If a prepared graph also contains an ordinary Rescale, supply its actual `runtime.scale_log2 : f64` or a physical modulus chain; export rejects an unresolved scale instead of rounding it. Arbitrary extra MLIR attributes remain unchanged in the placed IR; they are not added to the RuntimePlan schema.
+
+External ciphertext arguments normally start on rank 0 Host. If they are already resident on a GPU, set the **function attribute** `runtime.external_inputs_device = 0 : i64` (and `earth.arg_scales = array<f64: ...>` for actual input scales). This assigns all ciphertext arguments to rank 0/device 0 before HEFT computes dependency arrival times; no Host upload is generated for local consumers. The attribute requires one rank and a valid device index in `device-counts`; plaintext arguments still start on Host. It describes real caller-owned GPU values, not a request to hide transfers. Omitting it keeps the existing Host-input behavior.
 
 The zero-input stem calls an external, persistent prepared object that already owns its input/weights. Those objects are prepared outside this compilation; they are not implicit function arguments or compiler-generated plaintext initialization. `callee` names the callback registered by the runtime caller. The compiler does not implement or interpret that callback.
 
@@ -60,9 +62,19 @@ build/manual/bin/hecate-opt test/prepared-api/branching.mlir \
   --runtime-plan-format=json -o /tmp/prepared.mlir
 ```
 
-This emits `/tmp/prepared.prepared_branching.runtime-plan.json`. Omit `--runtime-plan-format=json` for binary output. Both use semantic `format_version: 7`; the binary container remains `CKKSPL01` version 1. Each call is an ordinary compute instruction with `op: "ApiCall"` and `attrs: {"callee": "prepared_stem", "call_id": "41"}`. `call_id` is a canonical decimal **string**, distinct from the plan's ValueIds. `inputs`, `output`, `place`, transfers and Release follow the normal RuntimePlan protocol. Opaque calls do not support input reuse. This is executable RuntimePlan, not a separate experiment schedule format.
+This emits `/tmp/prepared.prepared_branching.runtime-plan.json`. Omit `--runtime-plan-format=json` for binary output. Without buffers or device-resident external ciphertexts, both use semantic `format_version: 7`; the binary container remains `CKKSPL01` version 1. Each call is an ordinary compute instruction with `op: "ApiCall"` and `attrs: {"callee": "prepared_stem", "call_id": "41"}`. `call_id` is a canonical decimal **string**, distinct from the plan's ValueIds. `inputs`, `output`, `place`, transfers and Release follow the normal RuntimePlan protocol. Opaque calls do not support input reuse. This is executable RuntimePlan, not a separate experiment schedule format.
 
-`DacapoPreparedApiRuntimePlan` checks JSON/binary agreement, one/two-device placement, dependency order, physical metadata/custom-attribute preservation and invalid API calls using only Python's standard library.
+### Shared opaque buffers
+
+Use the exact syntax `!ckks.buffer<1234, "ckks.hoisted.v1">`: the first parameter is the declared byte count (uint64, including zero), and the second is a nonempty layout name understood by the callbacks. The compiler does not inspect the bytes or infer this size. Ordinary CKKS arithmetic still accepts only polynomial tensors.
+
+A shared Hoist graph is `x -> H`, then `(x, H) -> rotated_x` for each suffix. Each suffix is a separate ApiCall with one ciphertext result. See [`test/prepared-api/hoist-buffer.mlir`](test/prepared-api/hoist-buffer.mlir), which ends with an opaque Q6-to-Q30 Boot call. Buffers are internal values only: they cannot be external inputs or final outputs. Cross-place buffer transfers are rejected; the current target is one GPU. There is no automatic buffer copy or layout conversion.
+
+HEFT schedules these calls with their normal dependencies and declared latencies. Memory planning releases a shared buffer after its last consumer; ApiCalls never reuse input storage. Memory estimates count the declared buffer bytes exactly, separately from plaintext/ciphertext RNS storage. These declared bytes are not an estimate of any other workspace hidden inside a callback.
+
+Any plan with a buffer **or a device-resident external ciphertext** uses semantic V8, including a simple resident-input arithmetic graph with no ApiCall or Buffer. Buffer JSON values have `kind: "buffer"`, canonical decimal-string `buffer_bytes`, and string `buffer_layout`; their level, scale and components are zero and `ntt` is false. Their context and place are the real plan context and producer place. Ciphertext/plaintext JSON values do not gain buffer fields. Binary V8 appends uint64 bytes and a uint32 layout string-table reference to **every** value record (zero/empty for polynomial values), giving 51-byte records. V7 and earlier binary widths are unchanged.
+
+`DacapoPreparedApiRuntimePlan` and `DacapoPreparedApiBuffer` check JSON/binary agreement, placement, dependencies, fractional scales, shared-buffer lifetimes/byte counts, no callback reuse, and invalid types using only Python's standard library.
 
 ## Waterline plaintext preparation
 

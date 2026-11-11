@@ -30,17 +30,35 @@ uint64_t multiply(uint64_t a, uint64_t b) {
     throw std::overflow_error("memory size overflow");
   return a * b;
 }
+enum class StorageKind { Plaintext, Ciphertext, Buffer };
+const char *kindName(StorageKind kind) {
+  switch (kind) {
+  case StorageKind::Plaintext: return "plaintext";
+  case StorageKind::Ciphertext: return "ciphertext";
+  case StorageKind::Buffer: return "buffer";
+  }
+  llvm_unreachable("invalid storage kind");
+}
 struct Block {
   uint64_t valueId, bytes;
   ckks::RuntimePlace place;
-  bool plaintext, external;
+  StorageKind kind;
+  bool external;
   uint64_t born, retired = std::numeric_limits<uint64_t>::max();
 };
 struct PlaceStats {
-  uint64_t plaintext = 0, ciphertext = 0, peak = 0, allocated = 0;
+  uint64_t plaintext = 0, ciphertext = 0, buffer = 0, peak = 0, allocated = 0;
   uint64_t peakEventIndex = 0;
   Json peakEvent;
 };
+uint64_t &storageBytes(PlaceStats &stats, StorageKind kind) {
+  switch (kind) {
+  case StorageKind::Plaintext: return stats.plaintext;
+  case StorageKind::Ciphertext: return stats.ciphertext;
+  case StorageKind::Buffer: return stats.buffer;
+  }
+  llvm_unreachable("invalid storage kind");
+}
 struct EstimateRuntimeMemoryPass
     : ckks::impl::EstimateRuntimeMemoryBase<EstimateRuntimeMemoryPass> {
   using Base::Base;
@@ -84,31 +102,39 @@ struct EstimateRuntimeMemoryPass
       }
 
       auto allocate = [&](Value value, bool external) {
-        auto type = ckks::getPolyType(value);
         auto place = ckks::runtimePlace(value, func);
-        if (!type || !type.getComponents() || failed(place))
-          throw std::runtime_error("memory estimation requires CKKS polynomial "
-                                   "values with valid places");
-        uint64_t bytes =
-            multiply(multiply(multiply(degree, add(type.getLevel(), 1)),
-                              type.getComponents()),
-                     place->device < 0 ? 8 : 4);
+        if (failed(place))
+          throw std::runtime_error("memory estimation requires valid places");
+        uint64_t bytes;
+        StorageKind kind;
+        if (auto buffer = dyn_cast<ckks::BufferType>(value.getType())) {
+          bytes = buffer.getBytes();
+          kind = StorageKind::Buffer;
+        } else {
+          auto type = ckks::getPolyType(value);
+          if (!type || !type.getComponents())
+            throw std::runtime_error("memory estimation requires CKKS polynomial "
+                                     "or buffer values");
+          bytes = multiply(multiply(multiply(degree, add(type.getLevel(), 1)),
+                                    type.getComponents()),
+                           place->device < 0 ? 8 : 4);
+          kind = type.getComponents() == 1 ? StorageKind::Plaintext
+                                           : StorageKind::Ciphertext;
+        }
         uint64_t id = layout->ids.lookup(value);
         if (aliases.count(id))
           throw std::runtime_error("value allocated twice");
         aliases.emplace(id, blocks.size());
-        blocks.push_back(
-            {id, bytes, *place, type.getComponents() == 1, external, eventIndex});
+        blocks.push_back({id, bytes, *place, kind, external, eventIndex});
         auto &stats = places[*place];
-        (type.getComponents() == 1 ? stats.plaintext : stats.ciphertext) =
-            add(type.getComponents() == 1 ? stats.plaintext : stats.ciphertext,
-                bytes);
+        auto &used = storageBytes(stats, kind);
+        used = add(used, bytes);
         stats.allocated = add(stats.allocated, bytes);
       };
       auto sample = [&](const char *phase, Json ordinal,
                         const char *operation) {
         for (auto &[place, stats] : places) {
-          uint64_t current = add(stats.plaintext, stats.ciphertext);
+          uint64_t current = add(add(stats.plaintext, stats.ciphertext), stats.buffer);
           if (current <= stats.peak && !stats.peakEvent.is_null())
             continue;
           stats.peak = current;
@@ -117,7 +143,8 @@ struct EstimateRuntimeMemoryPass
                              {"instruction_ordinal", ordinal},
                              {"operation", operation},
                              {"plaintext_bytes", stats.plaintext},
-                             {"ciphertext_bytes", stats.ciphertext}};
+                             {"ciphertext_bytes", stats.ciphertext},
+                             {"buffer_bytes", stats.buffer}};
         }
       };
       for (Value argument : func.getArguments())
@@ -142,8 +169,7 @@ struct EstimateRuntimeMemoryPass
           auto &block = blocks[alias->second];
           if (!block.external) {
             auto &stats = places[block.place];
-            (block.plaintext ? stats.plaintext : stats.ciphertext) -=
-                block.bytes;
+            storageBytes(stats, block.kind) -= block.bytes;
             block.retired = eventIndex;
           }
           aliases.erase(alias);
@@ -207,7 +233,7 @@ struct EstimateRuntimeMemoryPass
           for (const Block *block : largest)
             objects.push_back({{"value_id", std::to_string(block->valueId)},
                                {"bytes", block->bytes},
-                               {"kind", block->plaintext ? "plaintext" : "ciphertext"},
+                               {"kind", kindName(block->kind)},
                                {"external", block->external}});
           stats.peakEvent["largest_objects"] = std::move(objects);
         }
@@ -220,7 +246,7 @@ struct EstimateRuntimeMemoryPass
              {"peak_bytes", stats.peak},
              {"peak", stats.peakEvent},
              {"distinct_allocation_bytes", stats.allocated},
-             {"retained_bytes", add(stats.plaintext, stats.ciphertext)}});
+             {"retained_bytes", add(add(stats.plaintext, stats.ciphertext), stats.buffer)}});
         llvm::errs() << "runtime memory " << func.getName()
                      << " rank=" << place.rank << " device=" << place.device
                      << " peak="
@@ -241,6 +267,9 @@ struct EstimateRuntimeMemoryPass
            "Sum of distinct planned object blocks, counting a reuse chain "
            "once; excludes unmodeled memory and is not a process memory upper "
            "bound."},
+          {"buffer_accounting",
+           "Declared opaque buffer bytes are included exactly; workspace not "
+           "declared as a buffer remains excluded."},
           {"excluded",
            {"keys", "parameter tables", "Rotate and Boot workspaces",
             "communication staging", "encoding caches",

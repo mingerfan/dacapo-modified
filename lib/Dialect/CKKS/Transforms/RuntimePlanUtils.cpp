@@ -56,6 +56,16 @@ FailureOr<RuntimePlanLayout> buildRuntimePlanLayout(func::FuncOp func) {
     func.emitError("RuntimePlan requires a single-block function");
     return failure();
   }
+  for (BlockArgument argument : func.getArguments())
+    if (isa<BufferType>(argument.getType())) {
+      func.emitError("RuntimePlan buffers cannot be external inputs");
+      return failure();
+    }
+  for (Value output : func.getBody().front().getTerminator()->getOperands())
+    if (isa<BufferType>(output.getType())) {
+      func.emitError("RuntimePlan buffers cannot be final outputs");
+      return failure();
+    }
   RuntimePlanLayout layout;
   uint64_t implicitId = 0, nextId = 0;
   const auto registerId = [&](Value value, uint64_t id) -> LogicalResult {

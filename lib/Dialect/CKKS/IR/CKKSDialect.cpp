@@ -5,10 +5,13 @@
 #include "mlir/IR/TypeSupport.h"
 #include "mlir/IR/Types.h"
 #include "mlir/Support/LLVM.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include <cmath>
 #include <cstdint>
+#include <string>
 
 using namespace mlir;
 
@@ -106,6 +109,38 @@ void hecate::ckks::CKKSDialect::initialize() {
   mlir::RankedTensorType::attachInterface<PolyTypeTensorModel>(*getContext());
 }
 
+::mlir::Type hecate::ckks::BufferType::parse(::mlir::AsmParser &parser) {
+  auto loc = parser.getCurrentLocation();
+  llvm::APInt bytes;
+  std::string layout;
+  if (parser.parseLess() || parser.parseInteger(bytes))
+    return {};
+  // Parse through APInt so the full uint64_t range is accepted without allowing
+  // negative literals to wrap into an unsigned value.
+  if (bytes.isNegative() || bytes.getActiveBits() > 64) {
+    parser.emitError(loc, "buffer byte count must be an unsigned 64-bit integer");
+    return {};
+  }
+  if (parser.parseComma() || parser.parseString(&layout) || parser.parseGreater())
+    return {};
+  return parser.getChecked<BufferType>(loc, parser.getContext(),
+                                       bytes.getZExtValue(), layout);
+}
+
+void hecate::ckks::BufferType::print(::mlir::AsmPrinter &printer) const {
+  printer << '<' << getBytes() << ", ";
+  printer.printString(getLayout());
+  printer << '>';
+}
+
+::mlir::LogicalResult hecate::ckks::BufferType::verify(
+    llvm::function_ref<::mlir::InFlightDiagnostic()> emitError, uint64_t,
+    llvm::StringRef layout) {
+  if (layout.empty())
+    return emitError() << "buffer layout must be nonempty";
+  return ::mlir::success();
+}
+
 ::mlir::LogicalResult hecate::ckks::ApiCallOp::verify() {
   if (getCallIdAttr().getInt() < 0)
     return emitOpError("call_id must be nonnegative");
@@ -113,9 +148,26 @@ void hecate::ckks::CKKSDialect::initialize() {
     return emitOpError("latency_us must be positive");
   if (getCallee().empty())
     return emitOpError("callee must be nonempty");
+  if (auto attr = (*this)->getAttr("runtime.scale_log2")) {
+    auto scale = dyn_cast<FloatAttr>(attr);
+    if (!scale || !scale.getType().isF64() ||
+        !std::isfinite(scale.getValueAsDouble()) ||
+        scale.getValueAsDouble() < 0 || scale.getValueAsDouble() > 1023)
+      return emitOpError("runtime.scale_log2 must be a finite f64 in [0, 1023]");
+  }
+  for (Value input : getInputs()) {
+    if (isa<ckks::BufferType>(input.getType()))
+      continue;
+    auto type = ckks::getPolyType(input);
+    if (!type || type.getComponents() < 2)
+      return emitOpError("inputs must be ranked ciphertext tensors or buffers; "
+                         "plaintexts are unsupported");
+  }
+  if (getResult().getType().isa<ckks::BufferType>())
+    return ::mlir::success();
   auto result = ckks::getPolyType(getResult());
   if (!result || result.getComponents() < 2)
-    return emitOpError("result must be ciphertext");
+    return emitOpError("result must be ciphertext or buffer");
   return ::mlir::success();
 }
 

@@ -140,6 +140,12 @@ public:
       else i32(r.at("scale_log2"));
       wire.number<uint8_t>(r.at("ntt").get<bool>());
       i32(r.at("components"));
+      // V8 appends this fixed-width tail to every value record. JSON keeps
+      // these fields exclusive to buffers; polynomial tails are zero/empty.
+      if (metadata.value("format_version", 1) >= 8) {
+        id(r.value("buffer_bytes", J("0")));
+        stringRef(r.value("buffer_layout", J("")));
+      }
     } else if (array == "external_inputs" || array == "final_outputs")
       id(r);
     else
@@ -210,7 +216,7 @@ private:
     wire.number<uint32_t>(entry->second);
   }
   void kind(const J &v) {
-    wire.number<uint8_t>(choice(v, {"plaintext", "ciphertext"}));
+    wire.number<uint8_t>(choice(v, {"plaintext", "ciphertext", "buffer"}));
   }
   uint8_t choice(const J &v, std::initializer_list<const char *> choices) {
     const auto value = v.get<std::string>();

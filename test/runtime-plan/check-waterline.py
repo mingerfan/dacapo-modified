@@ -161,7 +161,9 @@ def main():
             return subprocess.run([str(args.hecate_opt),str(path),f'-p=builtin.module(func.func({",".join(passes)}))','-o',str(temp/'out.mlir')],capture_output=True,text=True,timeout=90,cwd=args.source_dir)
         result=run(4096);assert result.returncode==0,result.stderr
         plan=json.loads(Path(f'{prefix}.waterline.runtime-plan.json').read_text())
-        assert plan['format_version']==4 and 'waterline' in plan
+        # This fixture has an explicitly Device-resident external CT, so it
+        # now uses V8 while retaining the Waterline Prepare configuration.
+        assert plan['format_version']==8 and 'waterline' in plan
         all_ops=plan['initialization']+plan['execution']
         assert sum(i['kind']=='prepare_plaintext' for i in all_ops)==1
         assert not any(i['kind'] in ('fence','encode','transfer') for i in all_ops)
@@ -172,7 +174,7 @@ def main():
         assert report['prepare_count']==1 and report['single_group_object_and_workspace_peak'][1]<4096
         for budget,fraction,extra in [(300,.5,''),(4096,.01,''),(4096,.5,'workspace-bytes-per-op=8192')]:
             bad=run(budget,fraction,extra);assert bad.returncode!=0 and 'single-group' in bad.stderr,bad.stderr
-        print('PASS: Prepare V4, no automatic Fence/reencode, frontend places/order, single-group rejections')
+        print('PASS: Prepare with resident-input V8, no automatic Fence/reencode, frontend places/order, single-group rejections')
         # A CPU-encoded Host plaintext stays alive while its separate pinned
         # uint32 upload buffer is in flight. This real compiler graph has one
         # shared plaintext and 200 consumers, so only the first group needs

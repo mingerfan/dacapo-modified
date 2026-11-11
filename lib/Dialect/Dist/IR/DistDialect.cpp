@@ -36,8 +36,10 @@ LogicalResult hecate::dist::TransferOp::verify() {
 }
 
 LogicalResult hecate::dist::ReleaseOp::verify() {
-  if (!hecate::ckks::getPolyType(getInput()))
-    return emitOpError("input must be a CKKS polynomial value");
+  auto tensor = dyn_cast<RankedTensorType>(getInput().getType());
+  if (!isa<hecate::ckks::BufferType>(getInput().getType()) &&
+      (!tensor || !isa<hecate::ckks::PolyType>(tensor.getElementType())))
+    return emitOpError("input must be a CKKS polynomial tensor or buffer value");
   return success();
 }
 

@@ -143,6 +143,11 @@ struct MaterializeCommunicationPass
         }
         if (*source == destination)
           continue;
+        if (isa<ckks::BufferType>(input.getType())) {
+          op.emitError("cross-place opaque buffer transfers are unsupported");
+          signalPassFailure();
+          return;
+        }
         auto &indicesAtPlaces = demandIndices[input];
         auto [found, inserted] =
             indicesAtPlaces.try_emplace(destination, demands.size());

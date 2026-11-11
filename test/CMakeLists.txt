@@ -6,6 +6,12 @@ add_test(NAME DacapoPreparedApiRuntimePlan
           --hecate-opt $<TARGET_FILE:hecate-opt>
           --source-dir ${PROJECT_SOURCE_DIR})
 
+add_test(NAME DacapoPreparedApiBuffer
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/prepared-api/check-buffer.py
+          --hecate-opt $<TARGET_FILE:hecate-opt>
+          --source-dir ${PROJECT_SOURCE_DIR})
+
 add_test(NAME DacapoScaleBootVerifier
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/scale-boot/check.py)

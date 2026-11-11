@@ -35,7 +35,7 @@ def PreparePlainOp : Dist_Op<"prepare_plain", [MemoryEffects<[MemAlloc, MemWrite
 
 def ReleaseOp : Dist_Op<"release", [MemoryEffects<[MemFree]>]> {
   let summary = "Release the runtime reference after the last use of a CKKS value";
-  let arguments = (ins AnyRankedTensor:$input, BoolAttr:$initialization);
+  let arguments = (ins AnyType:$input, BoolAttr:$initialization);
   let hasVerifier = 1;
 }
 

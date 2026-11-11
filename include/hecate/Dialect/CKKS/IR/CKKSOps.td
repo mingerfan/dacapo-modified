@@ -32,7 +32,21 @@ def PolyType : TypeDef<CKKS_Dialect, "Poly", [
   let genVerifyDecl = 0;
 }
 
+def BufferType : TypeDef<CKKS_Dialect, "Buffer"> {
+  let summary = "Opaque buffer with a byte count and layout identifier";
+  let description = [{
+    Represents non-polynomial data owned by a prepared task. The byte count is
+    an unsigned 64-bit value, including zero. The layout identifier is nonempty.
+    Syntax: !ckks.buffer<1234, "ckks.hoisted.v1">.
+  }];
+  let mnemonic = "buffer";
+  let parameters = (ins "uint64_t":$bytes, StringRefParameter<>:$layout);
+  let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
+}
+
 def PolyTensor : TensorOf<[PolyType]>;
+def ApiCallValue : AnyTypeOf<[PolyTensor, BufferType]>;
 
 class CKKS_Op<string mnemonic, list<Trait> traits = []> :
     Op<CKKS_Dialect, mnemonic, traits> {
@@ -40,11 +54,17 @@ class CKKS_Op<string mnemonic, list<Trait> traits = []> :
 }
 
 // A prepared callback is an opaque task: its internal scale/Boot decisions are
-// already fixed. Extra attributes carry physical metadata without interpretation.
+// already fixed. Extra attributes carry physical metadata without scale inference.
 def ApiCallOp : CKKS_Op<"apicall"> {
-  let summary = "Invoke one externally prepared CKKS ciphertext task";
-  let arguments = (ins Variadic<PolyTensor>:$inputs, StrAttr:$callee,
+  let summary = "Invoke one externally prepared CKKS task";
+  let description = [{
+    Polynomial inputs/results must be ciphertexts, not plaintexts.
+    The optional runtime.scale_log2 attribute records the actual output scale
+    exponent as a finite f64 in [0, 1023]. It does not constrain input scales.
+  }];
+  let arguments = (ins Variadic<ApiCallValue>:$inputs, StrAttr:$callee,
                        I64Attr:$call_id, I64Attr:$latency_us);
+  let results = (outs ApiCallValue:$result);
   let hasVerifier = 1;
 }
 

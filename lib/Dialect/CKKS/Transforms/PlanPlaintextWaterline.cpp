@@ -78,6 +78,8 @@ struct PlanPlaintextWaterlinePass : ckks::impl::PlanPlaintextWaterlineBase<PlanP
       return p->device + 1;
     };
     const auto bytes = [&](Value v) -> uint64_t {
+      if (auto buffer = dyn_cast<ckks::BufferType>(v.getType()))
+        return buffer.getBytes();
       auto t = ckks::getPolyType(v);
       if (!t || t.getLevel() < 0 || t.getLevel() > (1 << 20)) throw std::runtime_error("invalid physical CKKS type");
       return degree * (uint64_t(t.getLevel()) + 1) * t.getComponents() * (place(v) ? 4 : 8);

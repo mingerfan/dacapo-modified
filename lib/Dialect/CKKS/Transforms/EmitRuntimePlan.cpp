@@ -659,12 +659,14 @@ struct RuntimePlanBuilder {
                      llvm::StringRef bootProfile,
                      llvm::StringRef bootImplementation,
                      PlaintextBundleWriter &bundle,
-                     uint64_t inlinePayloadMaxBytes, bool profile)
+                     uint64_t inlinePayloadMaxBytes, bool profile,
+                     bool useFloatScales)
       : func(func), contextId(contextId), ntt(ntt), bootProfile(bootProfile),
         bootImplementation(bootImplementation), bundle(bundle),
         inlinePayloadMaxBytes(inlinePayloadMaxBytes), profile(profile) {
     if (auto moduli = func->getAttrOfType<DenseI64ArrayAttr>("ckks.rns_moduli"))
       scaleChain.reset(moduli.asArrayRef());
+    floatScales = useFloatScales;
   }
 
   template<class Writer> LogicalResult write(Writer &writer) {
@@ -789,6 +791,12 @@ private:
 
 private:
   LogicalResult assignIds() {
+    if (Attribute attr = func->getAttr("earth.arg_scales")) {
+      auto scales = dyn_cast<DenseF64ArrayAttr>(attr);
+      if (!scales || scales.size() != func.getNumArguments())
+        return func.emitError("earth.arg_scales must be an array<f64> matching "
+                              "the function arguments");
+    }
     std::set<int64_t> callIds;
     for (auto call : func.getOps<ckks::ApiCallOp>())
       if (!callIds.insert(call.getCallId()).second)
@@ -812,7 +820,7 @@ private:
   FailureOr<double> actualScale(Value value) {
     auto type = ckks::getPolyType(value);
     auto moduli = func->getAttrOfType<DenseI64ArrayAttr>("ckks.rns_moduli");
-    if (!moduli) return static_cast<double>(type.getScaleLog2());
+    if (!floatScales) return static_cast<double>(type.getScaleLog2());
     auto cached = actualScales.find(value);
     if (cached != actualScales.end()) return cached->second;
     double scale = type.getScaleLog2();
@@ -820,11 +828,21 @@ private:
       if (auto scales = func->getAttrOfType<DenseF64ArrayAttr>("earth.arg_scales"))
         scale = scales.asArrayRef()[argument.getArgNumber()];
     if (Operation *op = value.getDefiningOp()) {
-      if (isa<ckks::EncodeOp, dist::PreparePlainOp>(op)) {
+      // Prepared callbacks declare their physical result, including fractional
+      // scales that cannot fit in PolyType's nominal unsigned metadata.
+      if (isa<ckks::ApiCallOp, ckks::EncodeOp, dist::PreparePlainOp>(op)) {
         auto attr = op->getAttrOfType<FloatAttr>("runtime.scale_log2");
-        if (!attr) return op->emitError("native encoding is missing its actual scale"), failure();
+        if (attr)
+          scale = attr.getValueAsDouble();
+        else if (moduli && !isa<ckks::ApiCallOp>(op))
+          return op->emitError("native encoding is missing its actual scale"), failure();
+      } else if (isa<ckks::RescaleCOp>(op) && !moduli) {
+        auto attr = op->getAttrOfType<FloatAttr>("runtime.scale_log2");
+        if (!attr || !attr.getType().isF64())
+          return op->emitError("ordinary Rescale in a prepared API plan requires "
+                               "ckks.rns_moduli or explicit runtime.scale_log2 f64"), failure();
         scale = attr.getValueAsDouble();
-      } else if (!isa<ckks::BootstrapCOp, ckks::ApiCallOp>(op)) {
+      } else if (!isa<ckks::BootstrapCOp>(op)) {
         if (op->getNumOperands() == 0) return op->emitError("cannot resolve actual scale"), failure();
         auto input = actualScale(op->getOperand(0));
         if (failed(input)) return failure();
@@ -851,6 +869,21 @@ private:
   }
 
   FailureOr<Json> buildValueDesc(Value value, uint64_t id) {
+    if (auto buffer = dyn_cast<ckks::BufferType>(value.getType())) {
+      auto place = valuePlace(value);
+      if (failed(place))
+        return failure();
+      return Json{{"id", std::to_string(id)},
+                  {"kind", "buffer"},
+                  {"place", std::move(*place)},
+                  {"context", contextId},
+                  {"level", 0},
+                  {"scale_log2", 0},
+                  {"ntt", false},
+                  {"components", 0},
+                  {"buffer_bytes", std::to_string(buffer.getBytes())},
+                  {"buffer_layout", buffer.getLayout().str()}};
+    }
     auto type = ckks::getPolyType(value);
     if (!type) {
       if (Operation *definingOp = value.getDefiningOp())
@@ -881,7 +914,7 @@ private:
         {"place", std::move(*place)},
         {"context", contextId},
         {"level", type.getLevel()},
-        {"scale_log2", func->hasAttr("ckks.rns_moduli") ? Json(*scale) : Json(type.getScaleLog2())},
+        {"scale_log2", floatScales ? Json(*scale) : Json(type.getScaleLog2())},
         {"ntt", ntt},
         {"components", type.getComponents()}};
   }
@@ -968,7 +1001,7 @@ private:
         if (failed(scale)) return failure();
         (*instruction)["attrs"] = {
             {"target_level", outputType.getLevel()},
-            {"target_scale_log2", func->hasAttr("ckks.rns_moduli") ? Json(*scale) : Json(outputType.getScaleLog2())}};
+            {"target_scale_log2", floatScales ? Json(*scale) : Json(outputType.getScaleLog2())}};
       }
     } else if (auto value = dyn_cast<ckks::ModswitchCOp>(op)) {
       instruction = makeCompute(op, outputId, "mod_switch", {value.getSrc()});
@@ -1005,6 +1038,7 @@ private:
   func::FuncOp func;
   std::string contextId;
   bool ntt;
+  bool floatScales;
   std::string bootProfile;
   std::string bootImplementation;
   PlaintextBundleWriter &bundle;
@@ -1104,12 +1138,29 @@ struct EmitRuntimePlanPass
     bool version3 = false;
     bool version4 = func->hasAttr("runtime.waterline");
     bool version7 = false;
+    bool version8 = false;
     func.walk([&](Operation *op) {
       version2 |=
           isa<dist::ReleaseOp>(op) || op->hasAttr("runtime.reuse_input");
       version3 |= isa<dist::FenceOp>(op) || op->hasAttr("runtime.online_encode");
       version7 |= isa<ckks::ApiCallOp>(op);
+      for (Type type : op->getResultTypes())
+        version8 |= isa<ckks::BufferType>(type);
     });
+    for (BlockArgument argument : func.getArguments()) {
+      auto type = ckks::getPolyType(argument);
+      if (!type || type.getComponents() < 2)
+        continue;
+      auto place = ckks::runtimePlace(argument, func);
+      if (failed(place)) {
+        signalPassFailure();
+        return;
+      }
+      version8 |= place->device >= 0;
+    }
+    const int formatVersion = version8 ? 8 : version7 ? 7 :
+        func->hasAttr("ckks.rns_moduli") ? 5 : version4 ? 4 : version3 ? 3 :
+        (version2 ? 2 : 1);
     const auto exportStart = Clock::now();
     const auto rssStart = residentBytes();
     JsonArtifact artifact(artifactStem + (binary ? ".runtime-plan.bin" : ".runtime-plan.json"),
@@ -1130,10 +1181,10 @@ struct EmitRuntimePlanPass
         func, contextId.getValue(), ntt.getValue(), bootProfile.getValue(),
         bootImplementation.getValue(), bundle,
         static_cast<uint64_t>(inlinePayloadMaxBytes.getValue()),
-        reportIo.getValue());
+        reportIo.getValue(), formatVersion >= 5);
     double buildSeconds = 0, serializationSeconds = 0;
     auto emit = [&](auto &writer) -> LogicalResult {
-      writer.field("format_version", version7 ? 7 : func->hasAttr("ckks.rns_moduli") ? 5 : version4 ? 4 : version3 ? 3 : (version2 ? 2 : 1));
+      writer.field("format_version", formatVersion);
       if (version4) {
         auto c = func->getAttrOfType<StringAttr>("runtime.waterline");
         writer.field("waterline", Json::parse(c.getValue().str()));

@@ -923,6 +923,15 @@ public:
   LogicalResult run() {
     if (!func.getBody().hasOneBlock())
       return func.emitError("placement requires a single-block function");
+    if (Attribute attr = func->getAttr("runtime.external_inputs_device")) {
+      auto device = dyn_cast<IntegerAttr>(attr);
+      if (!device || !device.getType().isSignlessInteger(64) || device.getInt() < 0)
+        return func.emitError("runtime.external_inputs_device must be a nonnegative i64");
+      if (deviceCounts.size() != 1 || device.getInt() >= deviceCounts[0])
+        return func.emitError("runtime.external_inputs_device requires one rank "
+                              "and a device within device-counts");
+      externalInputPlace = Place{0, device.getInt()};
+    }
     if (failed(buildGraph()) || failed(computePriorities()) ||
         failed(schedule()) || failed(verifySchedule()))
       return failure();
@@ -931,6 +940,11 @@ public:
   }
 
 private:
+  Place argumentPlace(Value argument) const {
+    auto type = ckks::getPolyType(argument);
+    return type && type.getComponents() >= 2 ? externalInputPlace : Place{0, -1};
+  }
+
   LogicalResult buildGraph() {
     size_t logicalId = func.getNumArguments();
     size_t originalIndex = 0;
@@ -962,7 +976,7 @@ private:
       nodes.push_back(std::move(node));
     }
     for (BlockArgument argument : func.getArguments())
-      origins[argument] = {Place{0, -1}, 0};
+      origins[argument] = {argumentPlace(argument), 0};
 
     for (size_t index = 0; index < nodes.size(); ++index) {
       llvm::SmallDenseSet<size_t> uniquePredecessors;
@@ -983,6 +997,13 @@ private:
 
   FailureOr<int64_t> estimatePayloadBytes(Value value,
                                           Operation *consumer) const {
+    if (auto buffer = dyn_cast<ckks::BufferType>(value.getType())) {
+      if (buffer.getBytes() > uint64_t(std::numeric_limits<int64_t>::max())) {
+        consumer->emitError("buffer communication payload size is out of range");
+        return failure();
+      }
+      return static_cast<int64_t>(buffer.getBytes());
+    }
     auto poly = ckks::getPolyType(value);
     if (!poly) {
       consumer->emitError(
@@ -1023,6 +1044,8 @@ private:
   FailureOr<int64_t> modeledCommunicationCost(int64_t payloadBytes,
                                               const LinkModel &model,
                                               Operation *consumer) const {
+    if (payloadBytes == 0)
+      return model.startupLatencyMicroseconds;
     const double bytes = static_cast<double>(payloadBytes);
     double rate = 0;
     if (model.ratePoints.empty()) {
@@ -1277,8 +1300,9 @@ private:
     func->setAttr("dist.inter_rank_communication_cost",
                   builder.getI64IntegerAttr(interRankCost));
     for (unsigned index = 0; index < func.getNumArguments(); ++index) {
-      func.setArgAttr(index, "dist.rank", builder.getI64IntegerAttr(0));
-      func.setArgAttr(index, "dist.device", builder.getI64IntegerAttr(-1));
+      const Place place = argumentPlace(func.getArgument(index));
+      func.setArgAttr(index, "dist.rank", builder.getI64IntegerAttr(place.rank));
+      func.setArgAttr(index, "dist.device", builder.getI64IntegerAttr(place.device));
     }
     for (Node &node : nodes) {
       setPlace(node.op, node.place);
@@ -1311,6 +1335,7 @@ private:
   int64_t intraRankCost;
   int64_t interRankCost;
   std::optional<CommunicationProfile> communicationProfile;
+  Place externalInputPlace;
   std::vector<Place> candidates;
   std::vector<Place> hostCandidates;
   std::vector<Node> nodes;
