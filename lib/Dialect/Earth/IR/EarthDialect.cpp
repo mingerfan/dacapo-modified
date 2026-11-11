@@ -352,8 +352,15 @@ void hecate::earth::RotateOp::getCanonicalizationPatterns(
     if (index < 1) return failure();
     double scale = EarthDialect::nativeScaleChain.rescale(actualScale(op.getValue()), index);
     if (scale < 0) return failure();
+    // Hoisting replays the physical scale independently. A Rescale at the
+    // replacement exit can retain the caller's integer type.
+    auto nominal = static_cast<unsigned>(std::ceil(scale));
+    if (auto exit = attributes.getAs<IntegerAttr>("earth.hoist_exit_scale")) {
+      if (exit.getInt() < 0 || exit.getInt() > lScale.getScale()) return failure();
+      nominal = exit.getInt();
+    }
     inferredReturnTypes.push_back(lScale.switchLevel(lScale.getLevel() + 1)
-                                      .switchScale(static_cast<unsigned>(std::ceil(scale))));
+                                      .switchScale(nominal));
     return success();
   }
   inferredReturnTypes.push_back(

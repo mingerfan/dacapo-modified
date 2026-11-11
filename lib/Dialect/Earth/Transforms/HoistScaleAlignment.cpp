@@ -105,7 +105,18 @@ Query query(Value value, AlignmentState target, double floor, double error,
 }
 FailureOr<Value> emitScaleAlignment(
     OpBuilder &builder, Location loc, Value input, const ScaleAlignmentPlan &plan,
-    llvm::ArrayRef<Operation *> origins) {
+    llvm::ArrayRef<Operation *> origins, std::optional<unsigned> exitScale) {
+  // ModSwitch, AddCP, Rotate and Negate forward the nominal scale. Give
+  // the last scale-producing step the exit type's scale budget.
+  const AlignmentStep *scaleProducer = nullptr;
+  if (exitScale)
+    for (const auto &step : llvm::reverse(plan.steps)) {
+      if (step.operation.kind == AlignmentKind::MulPlain ||
+          step.operation.kind == AlignmentKind::Rescale) {
+        scaleProducer = &step;
+        break;
+      }
+    }
   Value current = input;
   for (const auto &step : plan.steps) {
     const auto &s = step.operation;
@@ -127,7 +138,14 @@ FailureOr<Value> emitScaleAlignment(
         plain = builder.create<ConstantOp>(loc, getTensorType(current), payload, builder.getF64FloatAttr(1));
       }
       auto type = getScaleType(current).toPlain();
-      if (s.kind == AlignmentKind::MulPlain) type = type.switchScale(std::ceil(s.plaintextScale));
+      if (&step == scaleProducer) {
+        // Allocate only the nominal bits still needed at the exit.
+        // The encoding below still uses the exact, possibly fractional scale.
+        if (type.getScale() > *exitScale) return failure();
+        type = type.switchScale(*exitScale - type.getScale());
+      } else if (s.kind == AlignmentKind::MulPlain) {
+        type = type.switchScale(std::ceil(s.plaintextScale));
+      }
       plain.getResult().setType(type.cast<TensorType>());
       plain->setAttr("earth.encoding_scale", builder.getF64FloatAttr(s.plaintextScale));
       plain->removeAttr("earth.actual_scale");
@@ -136,7 +154,13 @@ FailureOr<Value> emitScaleAlignment(
           : builder.create<AddOp>(loc, current, plain.getResult()).getResult();
     } else if (s.kind == AlignmentKind::Rescale) {
       if (level(current) != s.output.level + 1) return failure();
-      current = builder.create<RescaleOp>(loc, current);
+      auto rescale = builder.create<RescaleOp>(loc, current);
+      current = rescale.getResult();
+      if (&step == scaleProducer && getScaleType(current).getScale() != *exitScale) {
+        if (*exitScale > getScaleType(rescale.getValue()).getScale()) return failure();
+        rescale->setAttr("earth.hoist_exit_scale", builder.getI64IntegerAttr(*exitScale));
+        current.setType(getScaleType(current).switchScale(*exitScale));
+      }
     } else if (s.kind == AlignmentKind::ModSwitch) {
       if (level(current) <= s.output.level) return failure();
       current = builder.create<ModswitchOp>(loc, current, level(current) - s.output.level);
@@ -352,12 +376,21 @@ private:
 };
 
 FailureOr<Value> emitGraphPlan(OpBuilder &builder, Location loc, const GraphPlanPtr &plan,
-                              DenseMap<const GraphPlan *, Value> &emitted) {
+                              DenseMap<const GraphPlan *, Value> &emitted,
+                              std::optional<unsigned> exitScale) {
   if (auto found = emitted.find(plan.get()); found != emitted.end()) return found->second;
   if (plan->inputs.empty()) return plan->source;
   SmallVector<Value, 2> inputs;
+  // An aligned AddCC joins equal actual scales. Keep the same nominal budget
+  // in the rewritten arms so their max does not inflate the exit type.
+  auto childScale = isa_and_nonnull<AddOp>(plan->binary) ? exitScale : std::nullopt;
+  if (!plan->binary && llvm::none_of(plan->chain.result.plan->steps, [](const auto &step) {
+        return step.operation.kind == AlignmentKind::MulPlain ||
+               step.operation.kind == AlignmentKind::Rescale;
+      }))
+    childScale = exitScale;
   for (const auto &child : plan->inputs) {
-    auto input = emitGraphPlan(builder, loc, child, emitted);
+    auto input = emitGraphPlan(builder, loc, child, emitted, childScale);
     if (failed(input)) return failure();
     inputs.push_back(*input);
   }
@@ -374,7 +407,8 @@ FailureOr<Value> emitGraphPlan(OpBuilder &builder, Location loc, const GraphPlan
     result = copy->getResult(0);
     result.setType(types.front());
   } else {
-    auto value = emitScaleAlignment(builder, loc, inputs.front(), *plan->chain.result.plan, plan->chain.origins);
+    auto value = emitScaleAlignment(builder, loc, inputs.front(), *plan->chain.result.plan,
+                                    plan->chain.origins, exitScale);
     if (failed(value)) return failure();
     result = *value;
   }
@@ -427,7 +461,8 @@ struct HoistScaleAlignmentPass : hecate::earth::impl::HoistScaleAlignmentBase<Ho
     SmallVector<Attribute> trace;
     if (auto previous = func->getAttrOfType<ArrayAttr>("earth.scale_alignment_trace"))
       trace.append(previous.begin(), previous.end());
-    auto apply = [&](Value source, AlignmentState target, Operation *at) -> FailureOr<Value> {
+    auto apply = [&](Value source, AlignmentState target, Operation *at,
+                     std::optional<unsigned> exitScale = std::nullopt) -> FailureOr<Value> {
       GraphPlanner planner(waterline, unitError, boundaries, maxGraphQueries, maxGraphDepth);
       auto plan = planner.solve(source, target.scale);
       if (!plan || planner.hitLimit()) {
@@ -438,8 +473,12 @@ struct HoistScaleAlignmentPass : hecate::earth::impl::HoistScaleAlignmentBase<Ho
       }
       builder.setInsertionPoint(at);
       DenseMap<const GraphPlan *, Value> emitted;
-      auto value = emitGraphPlan(builder, at->getLoc(), plan, emitted);
-      if (failed(value)) { at->emitError("hoist-scale-alignment: emitted state disagrees with plan"); return failure(); }
+      auto value = emitGraphPlan(builder, at->getLoc(), plan, emitted, exitScale);
+      if (failed(value) || level(*value) != target.level ||
+          std::abs(actualScale(*value) - target.scale) > tolerance) {
+        at->emitError("hoist-scale-alignment: cannot emit the plan with its required exit state");
+        return failure();
+      }
       trace.push_back(builder.getDictionaryAttr({
           builder.getNamedAttr("strategy", builder.getStringAttr(plan->strategy)),
           builder.getNamedAttr("candidates", builder.getI64IntegerAttr(planner.candidates)),
@@ -451,11 +490,19 @@ struct HoistScaleAlignmentPass : hecate::earth::impl::HoistScaleAlignmentBase<Ho
           builder.getNamedAttr("reencoded_plaintexts", builder.getI64IntegerAttr(plan->encodingCost))}));
       return *value;
     };
+    struct Exit {
+      Type type;
+      AlignmentState physical;
+    };
+    DenseMap<Value, Exit> exits;
     auto eraseDead = [&] {
       for (auto &op : llvm::make_early_inc_range(llvm::reverse(func.front())))
         if (!isa<BootstrapOp>(op) && !fixed(&op) &&
             llvm::none_of(op.getResults(), [&](Value v) { return boundaries.contains(v); }) &&
-            isOpTriviallyDead(&op)) op.erase();
+            isOpTriviallyDead(&op)) {
+          for (Value v : op.getResults()) exits.erase(v);
+          op.erase();
+        }
     };
     // Repair explicit unsafe units first. Removal is restricted to private dead
     // operations; shared values remain immutable boundaries.
@@ -474,8 +521,11 @@ struct HoistScaleAlignmentPass : hecate::earth::impl::HoistScaleAlignmentBase<Ho
       if (fixed(op)) return op.emitError("hoist-scale-alignment: unsafe fixed unit");
       Value old = op.getResult();
       Value source = op->getOperand(*cipherOperand(op));
-      auto replacement = apply(source, state(old), op);
+      auto replacement = apply(source, state(old), op, getScaleType(old).getScale());
       if (failed(replacement)) return failure();
+      if (replacement->getType() != old.getType())
+        return op.emitError("hoist-scale-alignment: replacement changed nominal exit type");
+      exits.try_emplace(*replacement, Exit{old.getType(), state(old)});
       old.replaceAllUsesWith(*replacement);
       for (auto &entry : saved) if (entry.first == old) entry.first = *replacement;
       boundaries.erase(old);
@@ -498,7 +548,9 @@ struct HoistScaleAlignmentPass : hecate::earth::impl::HoistScaleAlignmentBase<Ho
       Value source = add->getOperand(low);
       if (level(source) != level(add->getOperand(1-low)))
         return add.emitError("hoist-scale-alignment requires an existing common Add level");
-      auto replacement = apply(source, {level(source), std::max(lhs,rhs)}, add);
+      exits.try_emplace(add.getResult(), Exit{add.getType(), state(add.getResult())});
+      auto replacement = apply(source, {level(source), std::max(lhs,rhs)}, add,
+                               getScaleType(add.getResult()).getScale());
       if (failed(replacement)) return failure();
       add->setOperand(low, *replacement);
       clearActualScales(func);
@@ -517,6 +569,15 @@ struct HoistScaleAlignmentPass : hecate::earth::impl::HoistScaleAlignmentBase<Ho
         return op.emitError("hoist-scale-alignment: result type inference failed");
       op.getResult(0).setType(types.front());
       auto s = state(op.getResult(0));
+      if (auto it = exits.find(op.getResult(0)); it != exits.end()) {
+        const auto &expected = it->second;
+        if (types.front() != expected.type || s.level != expected.physical.level ||
+            std::abs(s.scale - expected.physical.scale) > tolerance)
+          return op.emitError("hoist-scale-alignment: rebuilt exit disagrees with original type or physical state")
+                 << "; expected type " << expected.type << ", actual type " << types.front()
+                 << ", expected physical scale " << expected.physical.scale
+                 << ", actual physical scale " << s.scale;
+      }
       if (s.level < static_cast<unsigned>(EarthDialect::nativeArithmeticLowerLevel) ||
           !std::isfinite(s.scale) || s.scale < waterline-tolerance ||
           s.scale + 1 >= EarthDialect::nativeScaleChain.capacity(s.level))

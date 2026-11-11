@@ -48,6 +48,9 @@ def make_fixture(name, spec, digest, repaired=False):
         case['inputs'][1]['level'] = 6
     if name == 'addcc-demand-square':
         case['inputs'][2].update(level=5, scale_log2=80-math.log2(spec['context']['rns_moduli'][6])+.2)
+    if name == 'addcc-nominal-exit':
+        case['inputs'][0].update(level=9, scale_log2=46.185804)
+        case['inputs'][1].update(scale_log2=46.185804+math.log2(13_400_001))
     p = Plan(spec, case, digest)
     x, y, z = p.external
     q = spec['context']['rns_moduli']
@@ -106,6 +109,14 @@ def make_fixture(name, spec, digest, repaired=False):
     elif name == 'double-add':
         a = weighted(x,.75,delta)
         out = add(a,a)
+    elif name == 'addcc-nominal-exit':
+        # Old IR uses 47 + 23 = 70. After aligning to y, independently
+        # rounding the new unit encoding would give 47 + 24 = 71.
+        aligned = cp(ms(x,8), 1., math.log2(13_400_001) if repaired else 22.2)
+        summed = add(aligned, y)
+        scale = p.state(summed)['scale_log2']
+        bias = p.encode(.5, 8, scale)
+        out = p.compute('add_cp', [summed,bias], 8, scale)
     elif name in ('shared-two-edges', 'shared-no-budget'):
         a = weighted(x,.75)
         extra.append(a)  # Explicitly bind the shared prefix in the budget check.
@@ -122,7 +133,7 @@ def make_fixture(name, spec, digest, repaired=False):
         extra.extend([a, out])  # Bind the original Boot endpoints as well.
     else:
         raise ValueError(name)
-    if not repaired and name != 'addcc-demand-square':
+    if not repaired and name not in ('addcc-demand-square', 'addcc-nominal-exit'):
         out = cp(out, 1., math.log2(q[6])+.2 if name=='mulcc-existing-rescale' else .2)
     p.bindings['out'] = out
     names = ['out']
@@ -150,6 +161,8 @@ def make_fixture(name, spec, digest, repaired=False):
             expected = [a*b for a,b in zip(vx,vy)]
         elif name == 'double-add':
             expected = [1.5*a for a in vx]
+        elif name == 'addcc-nominal-exit':
+            expected = [a+b+.5 for a,b in zip(vx,vy)]
         elif name == 'addcc-mixed-repair':
             expected = [.75*a+b for a,b in zip(vx,vy)]
         elif name in ('shared-two-edges','shared-no-budget'):
@@ -208,6 +221,7 @@ def run(args, output):
         '--runtime-plan-format=json']
     names=('addcc-two-arms','nested-addcc','mulcc-both-arms','mulcc-right','square','shared-two-edges',
            'addcc-demand-square','square-unit-rescale','mulcc-unit-edge','addcc-mixed-repair','mulcc-existing-rescale','double-add',
+           'addcc-nominal-exit',
            'addcc-blocked-arm','shared-square-blocked','shared-no-budget','boot-blocked','query-limit')
     report,panels=[],[]
     for name in names:
@@ -237,6 +251,9 @@ def run(args, output):
             report.append(dict(case=name,status='rejected',diagnostic=expected))
             continue
         assert result.returncode==0,(name,result.stderr)
+        if name=='addcc-nominal-exit':
+            repaired_ir = (folder/'repaired.mlir').read_text()
+            assert '(tensor<8x!earth.ci<70 * 22>>, tensor<8x!earth.pl<70 * 22>>) -> tensor<8x!earth.ci<70 * 22>>' in repaired_ir
         repeat=compile_to('idempotent',f'func.func({alignment},{alignment})')
         assert repeat.returncode==0,repeat.stderr
         assert (folder/'repaired.mlir').read_text()==(folder/'idempotent.mlir').read_text()

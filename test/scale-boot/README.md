@@ -547,6 +547,9 @@ python3 test/scale-boot/check-alignment-planner.py --driver build/alignment-step
 
 处理顺序是：修复精度不足的全槽位乘 1；修复乘 1 之前低于密文 scale 下限的私有链
 （包括将已有乘 1 移到已有 Rescale 前）；再修复 AddCC 两侧的实际 scale 差异。
+原乘 1 的替换出口和修复后的 AddCC 结果都必须保留原有物理 level、实际 scale 和 Earth
+名义类型。生成 MulCP 时，末端明文的名义 scale 由出口类型扣除输入名义 scale 得到，
+实际编码仍使用规划的浮点 scale。类型重建后再次检查出口，避免独立取整改变下游 AddCP 的类型。
 被不同算子使用的共享密文、函数输入输出、Boot 两端、`sm_fixed`、`earth.saved_output` 和
 `earth.output_scale_source` 是不可穿越的边界。共享明文可以为改写的使用处另建 Encode，
 原明文和 payload 保留。不同 level 的 Add 输入应由前面的调度阶段处理。
